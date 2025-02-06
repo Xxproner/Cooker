@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD 17 REQUIRED)
 set(CMAKE_VERBOSE_MAKEFILE off)
 
 # boost
-find_package(Boost 1.8.3 COMPONENTS url system REQUIRED)
+find_package(Boost 1.8.3 COMPONENTS url system container REQUIRED)
 include_directories(${Boost_INCLUDE_DIR})
 link_libraries(${Boost_LIBRARIES})
 

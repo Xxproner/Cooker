@@ -1,8 +1,8 @@
 #include <stdlib.h> // exit()
 #include <time.h> // localtime_r() strptime()
 #include <string.h> // strncasecmp()
-#include <ctype.h>
-#include <errno.h>
+#include <ctype.h> // tolower(), isdigit()
+#include <errno.h> // strerror(), errno
 
 
 #include <iostream>
@@ -15,10 +15,11 @@
 #include <array>
 #include <type_traits> // to_underlaying(), underlaying_type
 #include <forward_list>
-#include <algorithm>
+#include <algorithm> // find_if_not()
 #include <initializer_list>
 #include <bitset>
-#include <charconv>
+#include <charconv> // from_chars()
+#include <set>
 
 
 
@@ -42,6 +43,14 @@ namespace url = boost::urls;
 
 #include "boost/system.hpp"
 #include "boost/tti/has_member_function.hpp"
+
+// #include "boost/property_tree/ptree.hpp"
+// template <typename Key, typename T, typename Compare = std::less<Key>>
+// using ptree = boost::property_tree::basic_ptree<
+// 	Key,
+// 	T,
+// 	Compare
+// >;
 
 
 #include "lyra.hpp"
@@ -91,6 +100,33 @@ namespace cooker_url_utils_ns
 		return potentialSubdomain.compare(
 			diff_len, std::string::npos, domain) == 0 && 
 				potentialSubdomain[diff_len - 1] == '.';
+	};
+
+
+
+	/**
+	 * == 0, full match 
+	 *  > 0, first is second's subdomain
+	 *  < 0, else
+	 * */
+	int
+	DomainSpaceshipOp(const std::string& l_domain, 
+		const std::string& r_domain)
+	{
+		bool isDomain = IsSubdomain(l_domain, r_domain);
+
+		if (isDomain)
+		{
+			if (l_domain.length() > r_domain.length())
+			{
+				return 1;
+			} else if (l_domain.length() == r_domain.length())
+			{
+				return 0;
+			}			
+		}
+
+		return -1;
 	};
 
 
@@ -307,7 +343,7 @@ public:
 
 	// const char* ParseSetCookieError() const
 	// { return m_parseSetCookieError ? m_key.c_str() : ""; };
-
+	// overload move operator
 
 
 	class cookie_policy_error : public std::runtime_error
@@ -757,11 +793,170 @@ std::string Cookie::defaultSameSiteValue = "None";
 
 
 
-using Cookies = std::forward_list<Cookie>;
-Cookies GrapCookies(const httplib::Headers& headers,
+/* vector by domain, multimap by path */
+struct CookiePathComparer
+{
+	/*constexpr*/ bool 
+	operator()(const Cookie& lhs, const Cookie& rhs) const noexcept
+	{
+		return lhs.m_path < rhs.m_path;
+	};
+
+
+	using is_transparent = std::string;
+	bool
+	operator()(const Cookie& lhs, const is_transparent& rhs) const noexcept
+	{
+		return lhs.m_path < rhs;
+	};
+
+
+
+	bool
+	operator()(const is_transparent& lhs, const Cookie& rhs) const noexcept
+	{
+		return lhs < rhs.m_path;
+	};
+};
+
+
+template <typename T>
+struct nullable 
+{
+private:
+	T* m_ptr;
+public:
+	struct null_error : std::runtime_error
+	{
+		null_error(const char* msg = "null")
+			: std::runtime_error(msg)
+		{
+
+		};
+	};
+
+	nullable(T* ptr)
+		: m_ptr(ptr)
+	{
+	};
+
+
+
+	// possible to inline operator= ?
+	T* operator=(T* ptr) const noexcept
+	{
+		m_ptr = ptr;
+	};
+
+
+
+	T* operator*() const noexcept(false)
+	{
+		return m_ptr ?: throw null_error();
+	};
+
+
+
+	T* operator->() const noexcept(false)
+	{
+		return m_ptr ?: throw null_error();
+	};
+
+
+
+	operator T*() const
+	{
+		return m_ptr ?: throw null_error();
+	}
+};
+
+
+using CookieUrlTree = std::multiset<Cookie, CookiePathComparer>;
+// TODO: change vector to dns tree
+using CookieDNSJar = std::vector<std::pair<std::string, CookieUrlTree>>;
+// TODO : improve search algo
+nullable<CookieUrlTree> FindCookieUrlTree(CookieDNSJar& cookieJar, const std::string& domain)
+{
+	typename CookieDNSJar::iterator cookieJarIter = 
+		std::find_if(cookieJar.begin(), cookieJar.end(), [&domain](const typename CookieDNSJar::value_type& pDomain_CookieUrlTree){
+			return pDomain_CookieUrlTree.first == domain;
+	});
+
+	return cookieJarIter != cookieJar.end() ? 
+		std::addressof(cookieJarIter->second) : nullptr;
+};
+
+
+CookieUrlTree* SearchCookieUrlTree(CookieDNSJar& cookieJar, const std::string& domain)
+#ifdef __GNUG__
+__attribute__((returns_nonnull))
+#endif // __GNUG__
+;
+
+CookieUrlTree* SearchCookieUrlTree(CookieDNSJar& cookieJar, const std::string& domain)
+{
+	CookieUrlTree* cookieUrlTreePtr = nullptr;
+	try
+	{
+		cookieUrlTreePtr = FindCookieUrlTree(cookieJar, domain);
+	} catch(const std::runtime_error&)
+	{
+		// not found
+		/*cookieUrlTree = */ cookieJar.emplace_back(domain, CookieUrlTree{});
+		cookieUrlTreePtr = std::addressof(cookieJar.back().second);
+	}
+
+	return cookieUrlTreePtr;
+};
+
+
+
+const Cookie&
+AddCookieToJar(CookieDNSJar& cookieJar, Cookie&& cookie)
+{
+	CookieUrlTree* cookieTreePtr = SearchCookieUrlTree(cookieJar, cookie.m_domain);
+
+	/*const*/ auto cookiesRangeEqPath = cookieTreePtr->equal_range(cookie.m_path);
+	const std::size_t cookiesEqPathNum = std::distance(
+		cookiesRangeEqPath.first, cookiesRangeEqPath.second);
+
+	if (cookiesEqPathNum == 0) // this path does not exists
+	{
+		return cookieTreePtr->emplace(std::move(cookie)).operator*();
+	} // else ...
+
+	/* check exists cookie with same key */
+	typename CookieUrlTree::iterator sameKeyCookieIter = std::find_if(cookiesRangeEqPath.first, cookiesRangeEqPath.second, 
+		[&cookie](const typename CookieUrlTree::value_type& i_cookie){
+			return cookie.m_key == i_cookie.m_key;
+	});
+
+	if (sameKeyCookieIter != cookiesRangeEqPath.second)
+	{
+		// overwrite cookie
+		// path will not be changed
+		// *sameKeyCookieIter = std::move(cookie);
+
+		// workaround ...
+		typename CookieUrlTree::node_type cookieTreeNode = cookieTreePtr->extract(sameKeyCookieIter);
+		assert(!cookieTreeNode.empty() && "Fatal logic error! Call value() mem_fn on empty node object is ub!");
+		cookieTreeNode.value() = std::move(cookie);
+		sameKeyCookieIter = cookieTreePtr->insert(std::move(cookieTreeNode));
+	} else
+	{
+		sameKeyCookieIter = 
+			cookieTreePtr->emplace_hint(cookiesRangeEqPath.first, std::move(cookie));
+	}
+
+	return sameKeyCookieIter.operator*();
+};
+
+
+
+CookieDNSJar GrapCookies(const httplib::Headers& headers,
 	const std::string& requestUrl)
 {
-	Cookies cookies;
+	CookieDNSJar cookieJar;
 
 	auto rangeCookies = headers.equal_range("Set-Cookie");
 	boost::system::result<url::url_view> parseUriRefResult = url::parse_uri_reference(requestUrl);
@@ -771,14 +966,6 @@ Cookies GrapCookies(const httplib::Headers& headers,
 	for ( ; rangeCookies.first != rangeCookies.second; rangeCookies.first++)
 	{
 		auto setCookieHeaderValue = rangeCookies.first->second;
-		// if (cookie.IsParseSetCookieError())
-		// {
-		// 	std::cerr << "From " << requestUrl << " cookie (" << setCookieHeaderValue <<  
-		// 		") is rejected. Reason: " <<
-		// 			 cookie.ParseSetCookieError() << std::endl;
-		// 	continue;
-		// }
-
 		try
 		{
 			Cookie cookie = Cookie::ParseSetCookieHeaderValue(setCookieHeaderValue);
@@ -838,7 +1025,7 @@ Cookies GrapCookies(const httplib::Headers& headers,
 			// decode ptc_string_view (a reference precent-encoded strings)
 			url::decode_view urlTarget = *boostUrlView.encoded_target();
 			cookie.m_setCookieOrigin.assign(urlTarget.begin(), urlTarget.end());
-			cookies.push_front(std::move(cookie));
+			AddCookieToJar(cookieJar, std::move(cookie));
 		} catch(const Cookie::cookie_policy_error& cookiePolicyError)
 		{
 			std::cerr << "> Cookie (" << setCookieHeaderValue << ") from "  << requestUrl << 
@@ -847,25 +1034,37 @@ Cookies GrapCookies(const httplib::Headers& headers,
 		}
 	}
 
-	return cookies;
+	return cookieJar;
 };
 
 
 
-using CookiesView = std::forward_list<Cookie*>;
-CookiesView FindCookiesByDomain(Cookies& cookies,
-	const std::string& domain)
+using CookiesView = std::forward_list<const Cookie*>;
+CookiesView FindCookies(const CookieDNSJar& cookieJar,
+	const std::string& domain, const std::string& path)
 {
 	CookiesView cookiesView;
-	for (auto& cookie : cookies)
+
+	// improve search domain
+	/*****************************************************/
+	for (const auto& pDomain_CookieUrlTree : cookieJar)
+	/*****************************************************/
 	{
-		/* may have start dot that should be skipped */
-		auto& cookieDomain = cookie.m_domain;
-		if ((cookie.IsOnlyCurrectDomain() && cookieDomain == domain) || 
-				cooker_url_utils_ns::IsSubdomain(domain, cookieDomain))
+		// check full match or subdomain
+		int op = cooker_url_utils_ns::DomainSpaceshipOp(pDomain_CookieUrlTree.first, domain);
+		if (op < 0)
 		{
-			cookiesView.push_front(std::addressof(cookie));
+			continue;
 		}
+
+		auto cookiesRangeEqPath = pDomain_CookieUrlTree.second.equal_range(path);
+		std::for_each(cookiesRangeEqPath.first, cookiesRangeEqPath.second, [op, &cookiesView](const typename CookieUrlTree::value_type& cookie){
+			if ((cookie.IsOnlyCurrectDomain() && (op == 0)) || 
+					op > 0)
+			{
+				cookiesView.push_front(std::addressof(cookie));
+			}
+		});
 	}
 
 	return cookiesView;
@@ -874,13 +1073,13 @@ CookiesView FindCookiesByDomain(Cookies& cookies,
 
 
 /* cookie name is unique withing `path' attribute */
-std::string ManageCookies(Cookies& cookies, const std::string& url)
+std::string ManageCookies(CookieDNSJar& cookieJar, const std::string& url)
 {
 	boost::system::result<url::url_view> uriParseResult = url::parse_uri_reference(url);
 	assert(uriParseResult);
 	auto boostUrlView = uriParseResult.value();
 
-	CookiesView cookiesView = FindCookiesByDomain(cookies, boostUrlView.host());
+	CookiesView cookiesView = FindCookies(cookieJar, boostUrlView.host(), boostUrlView.path());
 
 	std::string cookieHeaderValue; 
 	if (!cookiesView.empty())
@@ -926,65 +1125,81 @@ std::string to_string(const url::pct_string_view& pctStringView)
 
 
 
-void PrettyPrintCookies(const Cookies& cookies)
+void PrettyPrintCookies(const CookieDNSJar& cookieDNSJar)
 {
 	// just print, TODO : pretty print)
 	// cookie token delim
 	std::cout << "Cookies: \n";
 	constexpr const char* ctd = "; ";
-	for (const auto& cookie : cookies)
+	for (const auto& pDomain_CookieUrlTree : cookieDNSJar)
 	{
 		// key=value; domain; path; samesite; expires; secure; httponly; partitioned
-		std::cout << cookie.m_key << "=" << cookie.m_value << ctd;
-		if (!cookie.IsOnlyCurrectDomain())
+		for (const auto& cookie : pDomain_CookieUrlTree.second)
 		{
-			std::cout << "Domain=" << cookie.m_domain << ctd;
+
+			std::cout << cookie.m_key << "=" << cookie.m_value << ctd;
+			if (!cookie.IsOnlyCurrectDomain())
+			{
+				std::cout << "Domain=" << cookie.m_domain << ctd;
+			}
+
+			if (!cookie.m_path.empty())
+			{
+				std::cout << "Path=" << cookie.m_path << ctd;
+			}
+
+			std::cout << "SameSize=" << cookie.m_sameSite << ctd;
+		
+			std::cout << "Expires=";
+			if (!cookie.IsSessional())
+			{
+				constexpr std::size_t kBufSize = 1 << 6;
+				char buffer[kBufSize]; 
+				const time_t cookieExpiresTime = std::chrono::system_clock::to_time_t(
+					cookie.m_expires);
+				std::strncpy(buffer, ctime(&cookieExpiresTime), 24);
+				buffer[24] = 0; //remove `\n'
+				std::cout << buffer;
+			} else
+			{
+				std::cout << "Sessional";
+			}
+
+			std::cout << ctd;
+
+			if (cookie.m_secure)
+			{
+				std::cout << "Secure" << ctd;
+			}
+
+			if (cookie.m_httpOnly)
+			{
+				std::cout << "HttpOnly" << ctd;
+			}
+
+
+			if (cookie.m_partitioned)
+			{
+				std::cout << "Partitioned";
+			}
+
+			std::cout << '\n';
 		}
-
-		if (!cookie.m_path.empty())
-		{
-			std::cout << "Path=" << cookie.m_path << ctd;
-		}
-
-		std::cout << "SameSize=" << cookie.m_sameSite << ctd;
-	
-		std::cout << "Expires=";
-		if (!cookie.IsSessional())
-		{
-			constexpr std::size_t kBufSize = 1 << 6;
-			char buffer[kBufSize]; 
-			const time_t cookieExpiresTime = std::chrono::system_clock::to_time_t(
-				cookie.m_expires);
-			std::strncpy(buffer, ctime(&cookieExpiresTime), 24);
-			buffer[24] = 0; //remove `\n'
-			std::cout << buffer;
-		} else
-		{
-			std::cout << "Sessional";
-		}
-
-		std::cout << ctd;
-
-		if (cookie.m_secure)
-		{
-			std::cout << "Secure" << ctd;
-		}
-
-		if (cookie.m_httpOnly)
-		{
-			std::cout << "HttpOnly" << ctd;
-		}
-
-
-		if (cookie.m_partitioned)
-		{
-			std::cout << "Partitioned";
-		}
-
-		std::cout << '\n';
 	}			
 };
 
+
+
+void MergeCookies(CookieDNSJar& cookieJar, CookieDNSJar&& mergingCookies)
+{
+	for (auto& pDomain_CookieUrlTree : mergingCookies)
+	{
+		std::string& domain = pDomain_CookieUrlTree.first;
+
+		CookieUrlTree* cookieUrlTree = SearchCookieUrlTree(cookieJar, domain);
+		cookieUrlTree->merge(std::move(pDomain_CookieUrlTree.second));
+	}
+};
 
 
 
@@ -1076,7 +1291,7 @@ int main(int argc, char const *argv[])
 		return EXIT_FAILURE;
 	}
 
-	Cookies cookies = GrapCookies(httpResult->headers, url);
+	CookieDNSJar cookies = GrapCookies(httpResult->headers, url);
 	PrintTraceInfo(httpResult->version, httpResult->status, httpResult->reason, 
 		"GET", url);
 
@@ -1127,6 +1342,7 @@ int main(int argc, char const *argv[])
 			{
 				/* path changes, need to new client */
 				simpleClient.operator=(httplib::Client(to_string(boostLocationUrlView.encoded_origin())));
+				simpleClient.enable_server_certificate_verification(false);
 				urlPath = boostLocationUrlView.encoded_resource();
 				url = locationUrl;
 			} else if (boostLocationUrlView.is_path_absolute()) // absolute url
@@ -1160,9 +1376,10 @@ int main(int argc, char const *argv[])
 				return EXIT_FAILURE;
 			}
 
-			GrapCookies(httpResult->headers, url);
+			CookieDNSJar setCookies = GrapCookies(httpResult->headers, url);
 			PrintTraceInfo(httpResult->version, httpResult->status, httpResult->reason,
 				"GET", url);
+			MergeCookies(cookies, std::move(setCookies));
 		}
 	}
 
