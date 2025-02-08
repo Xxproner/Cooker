@@ -44,14 +44,6 @@ namespace url = boost::urls;
 #include "boost/system.hpp"
 #include "boost/tti/has_member_function.hpp"
 
-// #include "boost/property_tree/ptree.hpp"
-// template <typename Key, typename T, typename Compare = std::less<Key>>
-// using ptree = boost::property_tree::basic_ptree<
-// 	Key,
-// 	T,
-// 	Compare
-// >;
-
 
 #include "lyra.hpp"
 
@@ -175,6 +167,56 @@ namespace cooker_url_utils_ns
 	};
 }; // namespace cooker_url_utils_ns
 
+
+namespace cooker_HTTP_ns
+{
+	const char* PUT = "PUT";
+	const char* GET = "GET";
+	const char* HEAD = "HEAD";
+	const char* OPTIONS = "OPTIONS";
+	const char* POST = "POST";
+	const char* PATCH = "PATCH";
+	const char* DELETE = "DELETE";
+	const char* TRACE = "TRACE";
+	const char* CONNECT = "CONNECT";
+
+
+
+	static const char* methods[] = {
+		PUT, GET, HEAD, OPTIONS, POST, PATCH, DELETE, TRACE, CONNECT
+	};
+
+	constexpr std::size_t methodsNum = sizeof methods;
+
+	enum MethodHashValue : std::size_t
+	{
+		PUT_hv = 0,
+		GET_hv,
+		HEAD_hv,
+		POST_hv,
+		OPTIONS_hv,
+		PATCH_hv,
+		DELETE_hv,
+		TRACE_hv,
+		CONNECT_hv
+	};
+
+
+
+	struct method_hash
+	{
+		std::size_t operator()(std::string_view method, std::size_t methodHashValue = 0)
+		{
+			return method == methods[methodHashValue] ? methodHashValue : operator()(method, methodHashValue + 1);
+		};
+	};
+
+
+
+	bool IsHttpStatusCodeInList(int statusCode, std::initializer_list<int> list){
+		return std::find(list.begin(), list.end(), statusCode) != list.begin();
+	};
+}; // HTTP_cooker
 
 
 namespace cooker_details
@@ -310,6 +352,48 @@ namespace cooker_details
 };
 
 
+/* optimized for domain entity */
+// struct persistent_string
+// {
+// private:
+// 	// different string and number same chars 
+// 	// > 0 start equal
+// 	// < 0 tail equal
+// 	// prefer greater number, if strings have equal same head and tail
+// 	std::vector<std::pair<std::string, ssize_t>> m_container;
+// public:
+// 	persistent_string(std::string init_string)
+// 	{
+// 		m_container.reserve(4);
+// 		m_container.front() = std::make_pair(std::move(init_string), 0);
+// 	};
+
+
+
+// 	persistent_string& operator=(std::string snapshot_string)
+// 	{
+// 		// std::string& prev_string = m_container.back().first;
+// 	// 	std::pair<std::string::const_iterator, std::string::const_iterator> mismatchRes =
+// 	// 		std::mismatch(prev_string.cbegin(), prev_string.cend(),
+// 	// 			snapshot_string.cbegin(), snapshot_string.cend());
+
+// 	// 	const auto sameHeadCharsNum = std::distance(prev_string.cbegin(), mismatchRes.first);
+// 	// 	if ()
+// 	// 	{
+
+// 	// 	}
+// 		if (m_container.back().first != snapshot_string)
+// 		{
+// 			m_container.back() = std::make_pair(std::move(init_string), 0);
+// 		}
+// 		return *this;
+// 	};
+
+// 	friend 
+// 	void PrettyPrintCookies(const CookieDNSJar& cookieDNSJar);
+// };
+
+
 
 struct Cookie
 {
@@ -324,7 +408,7 @@ struct Cookie
 	std::string m_path;
 	
 	// persistent container
-	std::string m_setCookieOrigin;
+	std::string /*persistent_string*/ m_setCookieOrigin;
 
 	bool m_isSessional;
 	bool m_secure;
@@ -333,17 +417,51 @@ struct Cookie
 	bool m_partitioned;
 	bool m_isHosted;
 	bool m_isOnlyCurrDomain;
-// private:
-	// bool m_parseSetCookieError;
+private:
+	Cookie() = default;
 public:
-	// bool IsParseSetCookieError() const
-	// { return m_parseSetCookieError; };
+	Cookie(const Cookie&) = delete;
 
 
 
-	// const char* ParseSetCookieError() const
-	// { return m_parseSetCookieError ? m_key.c_str() : ""; };
-	// overload move operator
+	Cookie& operator=(const Cookie&) = delete;
+
+
+
+	Cookie(Cookie&& cookie)
+		: m_key(std::move(cookie.m_key))
+		, m_value(std::move(cookie.m_value))
+		, m_sameSite(cookie.m_sameSite)
+		, m_domain(std::move(cookie.m_domain))
+		, m_expires(std::move(cookie.m_expires))
+		, m_path(std::move(cookie.m_path))
+		, m_setCookieOrigin(std::move(cookie.m_setCookieOrigin))
+		, m_isSessional(cookie.m_isSessional)
+		, m_secure(cookie.m_secure)
+		, m_httpOnly(cookie.m_httpOnly)
+		, m_partitioned(cookie.m_partitioned)
+		, m_isHosted(cookie.m_isHosted)
+		, m_isOnlyCurrDomain(cookie.m_isOnlyCurrDomain)
+	{
+		// nothing
+	};
+
+
+
+	Cookie& operator=(Cookie&& cookie)
+	{
+		assert(cookie.m_domain == m_domain && 
+			cookie.m_path == m_path &&
+				cookie.m_key == m_key &&
+					"Fatal logic error! Overwriting cookies with same Path, Domain attrubute only");
+
+		// auto oldSetCookieOrigin = std::move(m_setCookieOrigin);
+		this->~Cookie();
+		::new (reinterpret_cast<void*>(this)) Cookie(std::move(cookie));
+		// oldSetCookieOrigin = std::move(m_setCookieOrigin);
+		return *this; 
+	};
+
 
 
 	class cookie_policy_error : public std::runtime_error
@@ -864,7 +982,7 @@ public:
 
 
 
-	operator T*() const
+	explicit operator T*() const
 	{
 		return m_ptr ?: throw null_error();
 	}
@@ -887,18 +1005,18 @@ nullable<CookieUrlTree> FindCookieUrlTree(CookieDNSJar& cookieJar, const std::st
 };
 
 
-CookieUrlTree* SearchCookieUrlTree(CookieDNSJar& cookieJar, const std::string& domain)
+CookieUrlTree* ForceFindCookieUrlTree(CookieDNSJar& cookieJar, const std::string& domain)
 #ifdef __GNUG__
 __attribute__((returns_nonnull))
 #endif // __GNUG__
 ;
 
-CookieUrlTree* SearchCookieUrlTree(CookieDNSJar& cookieJar, const std::string& domain)
+CookieUrlTree* ForceFindCookieUrlTree(CookieDNSJar& cookieJar, const std::string& domain)
 {
 	CookieUrlTree* cookieUrlTreePtr = nullptr;
 	try
 	{
-		cookieUrlTreePtr = FindCookieUrlTree(cookieJar, domain);
+		cookieUrlTreePtr = static_cast<CookieUrlTree*>(FindCookieUrlTree(cookieJar, domain));
 	} catch(const std::runtime_error&)
 	{
 		// not found
@@ -914,7 +1032,7 @@ CookieUrlTree* SearchCookieUrlTree(CookieDNSJar& cookieJar, const std::string& d
 const Cookie&
 AddCookieToJar(CookieDNSJar& cookieJar, Cookie&& cookie)
 {
-	CookieUrlTree* cookieTreePtr = SearchCookieUrlTree(cookieJar, cookie.m_domain);
+	CookieUrlTree* cookieTreePtr = ForceFindCookieUrlTree(cookieJar, cookie.m_domain);
 
 	/*const*/ auto cookiesRangeEqPath = cookieTreePtr->equal_range(cookie.m_path);
 	const std::size_t cookiesEqPathNum = std::distance(
@@ -1196,7 +1314,7 @@ void MergeCookies(CookieDNSJar& cookieJar, CookieDNSJar&& mergingCookies)
 	{
 		std::string& domain = pDomain_CookieUrlTree.first;
 
-		CookieUrlTree* cookieUrlTree = SearchCookieUrlTree(cookieJar, domain);
+		CookieUrlTree* cookieUrlTree = ForceFindCookieUrlTree(cookieJar, domain);
 		cookieUrlTree->merge(std::move(pDomain_CookieUrlTree.second));
 	}
 };
@@ -1208,20 +1326,119 @@ void PrintTraceInfo(const std::string& version, int status, const std::string& m
 {
 	(void)url;
 	(void)method;
-	std::cout << version  << " " << status << " " << 
+	std::cout << "> Request processed: " << version  << " " << status << " " << 
 		reason << std::endl;
 };
 
 
 
+httplib::Result InvokeHTTPMethod(const std::string& method, 
+	httplib::Client& client, const std::string& path, 
+	const httplib::Headers& headers, 
+	const char* body = nullptr, std::size_t content_length = 0ull,
+	const std::string& content_type = std::string())
+{
+	httplib::Result res;
+	static cooker_HTTP_ns::method_hash requestMethodHasher;
+	using namespace cooker_HTTP_ns;
+
+	std::cout << "> Request (" << method << " " << client.host() << path << ") processing...\n";
+
+	switch (requestMethodHasher(static_cast<std::string_view>(method)))
+	{
+		case OPTIONS_hv :
+		{
+			res = client.Options(path, headers);
+			break;
+		}
+		case GET_hv :
+		{
+			res = client.Get(path, headers, 
+				// reject main document downloading!
+				[](const char*, std::size_t ) { return true; });
+			break;
+		}
+		case HEAD_hv :
+		{
+			res = client.Head(path);
+			break;
+		}
+		case POST_hv :
+		{
+			if (body != nullptr)
+			{
+				res = client.Post(path, headers, body, content_length, content_type);
+			} else
+			{
+				res = client.Post(path, headers);
+			}
+			break;
+		}
+		case PUT_hv :
+		{
+			res = client.Put(path, headers, body, content_length, content_type);
+			break;
+		}
+		case DELETE_hv :
+		{
+			if (body != nullptr)
+			{
+				res = client.Delete(path, headers, body, content_length, content_type);
+			} else
+			{
+				res = client.Delete(path, headers);
+			}
+			break;
+		}
+		case PATCH_hv :
+		{
+			res = client.Patch(path, headers, body, content_length, content_type);
+			break;
+		}
+		case CONNECT_hv :
+		{
+			// if (body != nullptr)
+			// {
+			// 	res = client.CONNECT(path, headers, body, content_length, content_type);
+			// }
+		}
+		default:
+		{
+			std::cerr << "Unavailable http request method\n";
+			std::exit(EXIT_FAILURE);
+		}
+	}
+
+	return res;
+};
+
+
+
 using http = httplib::StatusCode;
+void TransformRedirectedMethod(std::string& method, int statusCode)
+{
+	// 
+	if (cooker_HTTP_ns::IsHttpStatusCodeInList(statusCode,
+			{ http::MovedPermanently_301, http::Found_302, http::SeeOther_303}))
+	{
+		method = "GET";
+	}
+};
+
+
+
 int main(int argc, char const *argv[])
 {
-	std::string method;
-	std::string url;
-	std::string defaultSameSite;
+	std::string method = "GET"
+		, url
+		, defaultSameSite
+		, data
+		, header;
+
 	bool isShowHelpTip = false
 		, followRedirect = false;
+
+	httplib::Headers defaultRequestHeaders;
 
 	auto cliParser = lyra::cli()
 		| lyra::help(isShowHelpTip)
@@ -1230,12 +1447,26 @@ int main(int argc, char const *argv[])
 			["--follow-redirect"]["-l"]
 			("Automatic redirection to 3xx http status code location value")
 				.optional()
-		| lyra::opt(defaultSameSite, "default SameSite value")
+		| lyra::opt(defaultSameSite, "default `SameSite' value")
 			["--default-samesite"]["-s"]
-			("Default SameSize value of cookie. (developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie#samesitesamesite-value)")
+			("Default `SameSize' value of cookie. (developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie#samesitesamesite-value)")
 				.optional().choices("same", "lax", "none")
+		// | lyra::opt(header, "test") // not accept multiple
+		// 	["--header"]["-H"]
+		// 	("test")
+		// 		.optional()
+		| lyra::group([&](const lyra::group&) {
+			}) 	| lyra::opt(method, "request method")
+					["-X"]
+					("HTTP method")
+						.optional()
+				| lyra::opt(data, "request body")
+					["--data"]["-d"]
+					("HTTP request content")
+						.optional()
 		| lyra::arg(url, "url")
 			("Destination url request").required();
+
 
 	auto parseResult = cliParser.parse({argc, argv});
 	if (!parseResult || isShowHelpTip)
@@ -1245,12 +1476,24 @@ int main(int argc, char const *argv[])
 			EXIT_FAILURE;
 	}
 
-
 	if (!defaultSameSite.empty()) 
 	{
 		Cookie::defaultSameSiteValue = 
 			std::move(defaultSameSite);
 	}
+
+	// capitalize method
+	std::for_each(method.begin(), method.end(), [](char& ch) { ch = std::toupper(ch); });
+
+
+	// -H 'Sec-Fetch-Dest: document'
+	// -H 'Sec-Fetch-Mode: navigate' 
+	// -H 'Sec-Fetch-Site: cross-site' 
+	// -H 'Priority: u=0, i'
+	defaultRequestHeaders.emplace("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+	defaultRequestHeaders.emplace("Accept-Language", "en-US;q=1");
+	defaultRequestHeaders.emplace("Accept-Encoding", "gzip");
+	defaultRequestHeaders.emplace("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0");
 
 	url::url_view boostUrlView;
 	auto [urlHost, urlPath] = cooker_url_utils_ns::SplitUrlIntoOriginAndPath(url, boostUrlView);
@@ -1261,43 +1504,29 @@ int main(int argc, char const *argv[])
 	}
 
 	httplib::Client simpleClient(urlHost);
-	std::cerr << "Client certificate verification disabled!\n";
 	simpleClient.enable_server_certificate_verification(false);
-
-	// -H 'Sec-Fetch-Dest: document'
-	// -H 'Sec-Fetch-Mode: navigate' 
-	// -H 'Sec-Fetch-Site: cross-site' 
-	// -H 'Priority: u=0, i'
-	httplib::Headers defaultRequestHeaders;
-	defaultRequestHeaders.emplace("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-	defaultRequestHeaders.emplace("Accept-Language", "en-US;q=1");
-	defaultRequestHeaders.emplace("Accept-Encoding", "gzip");
-	defaultRequestHeaders.emplace("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0");
+	std::cerr << "Client certificate verification disabled!\n";
 	
 	simpleClient.set_compress(true);
 	
-	std::cout << "Request (GET " << url << ") processing..." << std::endl;
-	httplib::Result httpResult = simpleClient.Get(urlPath, defaultRequestHeaders,
-		// reject main document downloading!
-		[](const char*, std::size_t ) { return true; });
+	// check method correctness :
+	httplib::Result httpResult = InvokeHTTPMethod(method, simpleClient, 
+		urlPath, defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
+
 	auto in_range = [](int number, int lower, int upper){
 		return (unsigned)(number - lower) <= (upper - lower);
 	};
 
 	if (!httpResult)
 	{
-		std::cerr << "Request (GET " << url << ") failed! " << 
+		std::cerr << "Request (" << method << " " << url << ") failed! " << 
 			httplib::to_string(httpResult.error()) << '\n';
 		return EXIT_FAILURE;
 	}
 
 	CookieDNSJar cookies = GrapCookies(httpResult->headers, url);
-	PrintTraceInfo(httpResult->version, httpResult->status, httpResult->reason, 
-		"GET", url);
-
-	auto IsHttpStatusCodeInList = [](int statusCode, std::initializer_list<int> list){
-		return std::find(list.begin(), list.end(), statusCode) != list.begin();
-	};
+	PrintTraceInfo(httpResult->version, httpResult->status, method, 
+		httpResult->reason, url);
 
 	if (followRedirect)
 	{
@@ -1310,17 +1539,7 @@ int main(int argc, char const *argv[])
 				defaultRequestHeaders.erase(cookieHeaderIter);
 			}
 
-			/* may be relative to the request URL or an absolute URL */
-			// accept by cookie, 301, 308, 304?, 302, 303, 307
-			auto resStatus = httpResult->status;
-			if (!IsHttpStatusCodeInList(resStatus, {http::MovedPermanently_301, 
-					http::PermanentRedirect_308, http::Found_302, http::SeeOther_303, http::TemporaryRedirect_307}))
-			{
-				std::cout << "Follow redirect param is chosen but cooker not support " << 
-					resStatus << ' ' << httpResult->reason << " redirection" << std::endl;
-				PrettyPrintCookies(cookies);
-				return EXIT_SUCCESS;
-			}
+			TransformRedirectedMethod(method, httpResult->status);
 
 			typename httplib::Headers::const_iterator 
 				locationHTTPHeader = httpResult->headers.find("Location");
@@ -1365,20 +1584,18 @@ int main(int argc, char const *argv[])
 				cookieHeaderIter = defaultRequestHeaders.cend();
 			}
 
-			/* next request depend upon http status code*/
-			// TODO:
-			std::cout << "Request (GET " << url << ") processing..." << std::endl;
-			httpResult = simpleClient.Get(urlPath, defaultRequestHeaders);
+			httpResult = InvokeHTTPMethod(method, simpleClient, urlPath,
+				defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
 			if (!httpResult)
 			{
-				std::cerr << "Request (GET " << url << ") failed! " << 
+				std::cerr << "Request (" << method << " " << url << ") failed! " << 
 					httplib::to_string(httpResult.error()) << '\n';
 				return EXIT_FAILURE;
 			}
 
 			CookieDNSJar setCookies = GrapCookies(httpResult->headers, url);
-			PrintTraceInfo(httpResult->version, httpResult->status, httpResult->reason,
-				"GET", url);
+			PrintTraceInfo(httpResult->version, httpResult->status,
+				method, httpResult->reason, url);
 			MergeCookies(cookies, std::move(setCookies));
 		}
 	}
