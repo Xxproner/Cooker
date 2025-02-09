@@ -21,6 +21,7 @@
 #include <charconv> // from_chars()
 #include <set>
 #include <filesystem>
+#include <functional> // bind()
 
 
 template <typename Enum>
@@ -29,7 +30,6 @@ auto to_underlying(Enum e)
 	return static_cast<
 		typename std::underlying_type<Enum>::type>(e);
 }
-
 
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
@@ -1146,9 +1146,9 @@ CookieDNSJar GrapCookies(const httplib::Headers& headers,
 			AddCookieToJar(cookieJar, std::move(cookie));
 		} catch(const Cookie::cookie_policy_error& cookiePolicyError)
 		{
-			std::cerr << "> Cookie (" << setCookieHeaderValue << ") from "  << requestUrl << 
+			std::cerr << "Warning: Cookie (" << setCookieHeaderValue << ") from "  << requestUrl << 
 				" is REJECTED. Reason: " <<
-					cookiePolicyError.what() << std::endl;
+					cookiePolicyError.what() << "\n\n";
 		}
 	}
 
@@ -1321,14 +1321,14 @@ void MergeCookies(CookieDNSJar& cookieJar, CookieDNSJar&& mergingCookies)
 
 
 
-void PrintTraceInfo(const std::string& version, int status, const std::string& method, 
-	const std::string& reason, const std::string& url)
-{
-	(void)url;
-	(void)method;
-	std::cout << "> Request processed: " << version  << " " << status << " " << 
-		reason << std::endl << std::endl;
-};
+// void PrintTraceInfo(const std::string& version, int status, const std::string& method, 
+// 	const std::string& reason, const std::string& url)
+// {
+// 	(void)url;
+// 	(void)method;
+// 	std::cout << "> Request processed: " << version  << " " << status << " " << 
+// 		reason << std::endl << std::endl;
+// };
 
 
 
@@ -1341,8 +1341,6 @@ httplib::Result InvokeHTTPMethod(const std::string& method,
 	httplib::Result res;
 	static cooker_HTTP_ns::method_hash requestMethodHasher;
 	using namespace cooker_HTTP_ns;
-
-	std::cout << "> " << method << " " << client.host() << path << " ...\n";
 
 	switch (requestMethodHasher(static_cast<std::string_view>(method)))
 	{
@@ -1415,14 +1413,48 @@ httplib::Result InvokeHTTPMethod(const std::string& method,
 
 
 using http = httplib::StatusCode;
-void TransformRedirectedMethod(std::string& method, int statusCode)
+void TransformRedirectedMethod(std::string& method, int statusCode,
+	[[maybe_unused]] httplib::Headers& headers)
 {
-	// 
 	if (cooker_HTTP_ns::IsHttpStatusCodeInList(statusCode,
-			{ http::MovedPermanently_301, http::Found_302, http::SeeOther_303}))
+			{ http::MovedPermanently_301, http::Found_302, http::SeeOther_303}) && method != cooker_HTTP_ns::GET)
 	{
 		method = "GET";
+
+		// remove content-type header
+		// auto EraseHeader = [&headers](const std::string& key){
+		// 	headers.erase(key);
+		// };
+		
+		// EraseHeader("Content-Type");
+		// EraseHeader("Content-Length");
 	}
+};
+
+
+
+void CookerLogger(const httplib::Request& req, const httplib::Response& res, 
+	int verboseMode)
+{
+	std::cout << "> " << req.method << ' ' << req.path << ' ' << res.version << '\n';
+	if (verboseMode)
+	{
+		for (const auto& [key, value] : req.headers)
+		{
+			std::cout << "> " << key << ' ' << value << '\n';
+		}			
+	}
+	std::cout << ">\n";
+
+	std::cout << "< " << res.version << ' ' << res.status << ' ' << res.reason << '\n';
+	if (verboseMode)
+	{
+		for (const auto& [key, value] : res.headers)
+		{
+			std::cout << "< " << key << ' ' << value << '\n';
+		}			
+	}
+	std::cout << "<\n";
 };
 
 
@@ -1477,7 +1509,7 @@ std::string method = "GET"
 					("HTTP method")
 						.optional()
 				| lyra::opt(data, "request body")
-					["--data"]["-d"]
+					["--data-raw"]["-d"]
 					("HTTP request content")
 						.optional()
 		| lyra::arg(url, "url")
@@ -1501,13 +1533,6 @@ std::string method = "GET"
 	// capitalize method
 	std::for_each(method.begin(), method.end(), [](char& ch) { ch = std::toupper(ch); });
 
-	auto FindHeaderOrInsert = [&defaultRequestHeaders](const char* key, const char* value){
-		if (defaultRequestHeaders.find(key) == defaultRequestHeaders.cend())
-		{
-			defaultRequestHeaders.emplace(key, value);
-		}
-	};
-
 
 	url::url_view boostUrlView;
 	auto [urlOrigin, urlPath] = cooker_url_utils_ns::SplitUrlIntoOriginAndPath(url, boostUrlView);
@@ -1519,8 +1544,7 @@ std::string method = "GET"
 
 	httplib::Client simpleClient(urlOrigin);
 
-	std::string strCaCertPath
-		, strCaCertDir;
+	simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
 
 	if (simpleClient.is_ssl())
 	{
@@ -1533,12 +1557,10 @@ std::string method = "GET"
 		simpleClient.set_ca_cert_path(strCaCertFilepath);
 	}
 
-	auto OverwriteHeader = [&defaultRequestHeaders](const char* key, const char* value){
-		if (httplib::Headers::const_iterator iter = defaultRequestHeaders.find(key);
-				iter != defaultRequestHeaders.cend())
+	auto FindHeaderOrInsert = [&defaultRequestHeaders](std::string key, std::string value){
+		if (defaultRequestHeaders.find(key) == defaultRequestHeaders.cend())
 		{
-			defaultRequestHeaders.erase(iter);
-			defaultRequestHeaders.emplace(key, value);
+			defaultRequestHeaders.emplace(std::move(key), std::move(value));
 		}
 	};
 
@@ -1547,10 +1569,19 @@ std::string method = "GET"
 	// -H 'Sec-Fetch-Mode: navigate' 
 	// -H 'Sec-Fetch-Site: cross-site' 
 	// -H 'Priority: u=0, i'
-	FindHeaderOrInsert("Host", to_string(boostUrlView.host()).c_str());
+	FindHeaderOrInsert("Host", to_string(boostUrlView.host()));
 	FindHeaderOrInsert("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
 	FindHeaderOrInsert("Accept-Language", "en-US;q=1");
 	FindHeaderOrInsert("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0");
+
+	auto OverwriteHeader = [&defaultRequestHeaders](std::string key, std::string value){
+		if (httplib::Headers::const_iterator iter = defaultRequestHeaders.find(key);
+				iter != defaultRequestHeaders.cend())
+		{
+			defaultRequestHeaders.erase(iter);
+			defaultRequestHeaders.emplace(std::move(key), std::move(value));
+		}
+	};
 
 	simpleClient.set_compress(true);
 	OverwriteHeader("Accept-Encoding", "gzip");
@@ -1570,8 +1601,8 @@ std::string method = "GET"
 	}
 
 	CookieDNSJar cookies = GrapCookies(httpResult->headers, url);
-	PrintTraceInfo(httpResult->version, httpResult->status, method, 
-		httpResult->reason, url);
+	// PrintTraceInfo(httpResult->version, httpResult->status, method, 
+	// 	httpResult->reason, url);
 
 	if (followRedirect)
 	{
@@ -1584,7 +1615,7 @@ std::string method = "GET"
 				defaultRequestHeaders.erase(cookieHeaderIter);
 			}
 
-			TransformRedirectedMethod(method, httpResult->status);
+			TransformRedirectedMethod(method, httpResult->status, defaultRequestHeaders);
 
 			typename httplib::Headers::const_iterator 
 				locationHTTPHeader = httpResult->headers.find("Location");
@@ -1613,7 +1644,7 @@ std::string method = "GET"
 			{
 				/* path changes, need to new client */
 				simpleClient.operator=(httplib::Client(to_string(boostLocationUrlView.encoded_origin())));
-				
+				simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
 				if (simpleClient.is_ssl())
 				{
 					if (strCaCertFilepath.empty())
@@ -1647,6 +1678,8 @@ std::string method = "GET"
 				cookieHeaderIter = defaultRequestHeaders.cend();
 			}
 
+			std::cout << "> Redirecting to " << url << "\n\n";
+
 			httpResult = InvokeHTTPMethod(method, simpleClient, urlPath,
 				defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
 			if (!httpResult)
@@ -1657,8 +1690,8 @@ std::string method = "GET"
 			}
 
 			CookieDNSJar setCookies = GrapCookies(httpResult->headers, url);
-			PrintTraceInfo(httpResult->version, httpResult->status,
-				method, httpResult->reason, url);
+			// PrintTraceInfo(httpResult->version, httpResult->status,
+			// 	method, httpResult->reason, url);
 			MergeCookies(cookies, std::move(setCookies));
 		}
 	}
