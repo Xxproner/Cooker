@@ -38,6 +38,8 @@ OPTIONS, ARGUMENTS:
 # Dependencies
 * [Lyra](https://github.com/bfgroup/Lyra) (one header library)
 * [httplib](https://github.com/yhirose/cpp-httplib) (one header library)
+* zlib
+* openssl
 * boost's components: [url](https://www.boost.org/), [system](https://www.boost.org/), [tti](https://www.boost.org/)
 _**./3rdParty**_ directory includes two start dependencies. 
 # Build
