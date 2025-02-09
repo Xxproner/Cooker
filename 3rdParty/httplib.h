@@ -1900,13 +1900,15 @@ public:
 
   SSL_CTX *ssl_context() const;
 #endif
+  
+  bool is_ssl() const;
 
 private:
   std::unique_ptr<ClientImpl> cli_;
 
-#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+// #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
   bool is_ssl_ = false;
-#endif
+// #endif
 };
 
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
@@ -10307,6 +10309,11 @@ inline void Client::set_logger(Logger logger) {
 inline void Client::set_ca_cert_path(const std::string &ca_cert_file_path,
                                      const std::string &ca_cert_dir_path) {
   cli_->set_ca_cert_path(ca_cert_file_path, ca_cert_dir_path);
+}
+
+inline bool Client::is_ssl() const
+{
+  return is_ssl_;
 }
 
 inline void Client::set_ca_cert_store(X509_STORE *ca_cert_store) {

@@ -20,7 +20,7 @@
 #include <bitset>
 #include <charconv> // from_chars()
 #include <set>
-
+#include <filesystem>
 
 
 template <typename Enum>
@@ -1327,7 +1327,7 @@ void PrintTraceInfo(const std::string& version, int status, const std::string& m
 	(void)url;
 	(void)method;
 	std::cout << "> Request processed: " << version  << " " << status << " " << 
-		reason << std::endl;
+		reason << std::endl << std::endl;
 };
 
 
@@ -1342,7 +1342,7 @@ httplib::Result InvokeHTTPMethod(const std::string& method,
 	static cooker_HTTP_ns::method_hash requestMethodHasher;
 	using namespace cooker_HTTP_ns;
 
-	std::cout << "> Request (" << method << " " << client.host() << path << ") processing...\n";
+	std::cout << "> " << method << " " << client.host() << path << " ...\n";
 
 	switch (requestMethodHasher(static_cast<std::string_view>(method)))
 	{
@@ -1429,14 +1429,17 @@ void TransformRedirectedMethod(std::string& method, int statusCode)
 
 int main(int argc, char const *argv[])
 {
-	std::string method = "GET"
+std::string method = "GET"
 		, url
 		, defaultSameSite
 		, data
-		, header;
+		, header
+		, strCaCertFilepath;
+
 
 	bool isShowHelpTip = false
-		, followRedirect = false;
+		, followRedirect = false
+		, verboseMode = false;
 
 	httplib::Headers defaultRequestHeaders;
 
@@ -1447,14 +1450,27 @@ int main(int argc, char const *argv[])
 			["--follow-redirect"]["-l"]
 			("Automatic redirection to 3xx http status code location value")
 				.optional()
+		| lyra::opt(verboseMode)
+			["--verbose"]["-v"]
+			("Verbose mode")
+				.optional()
+		| lyra::opt(strCaCertFilepath, "certificate path")
+			["--ssl_cert"]["-s"]
+			("Certificate path")
+				.optional()
 		| lyra::opt(defaultSameSite, "default `SameSite' value")
 			["--default-samesite"]["-s"]
 			("Default `SameSize' value of cookie. (developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie#samesitesamesite-value)")
 				.optional().choices("same", "lax", "none")
-		// | lyra::opt(header, "test") // not accept multiple
-		// 	["--header"]["-H"]
-		// 	("test")
-		// 		.optional()
+		| lyra::opt([&](std::string header) {
+				const std::size_t keyValueDelimPos = header.find(':');
+				assert(keyValueDelimPos != std::string::npos);
+				defaultRequestHeaders.emplace(header.substr(0, keyValueDelimPos),
+					header.substr(keyValueDelimPos + 1));
+			}, "<header key : header value>")
+			["--header"]["-H"]
+			("Specify HTTP header")
+				.cardinality(0,0)
 		| lyra::group([&](const lyra::group&) {
 			}) 	| lyra::opt(method, "request method")
 					["-X"]
@@ -1485,32 +1501,61 @@ int main(int argc, char const *argv[])
 	// capitalize method
 	std::for_each(method.begin(), method.end(), [](char& ch) { ch = std::toupper(ch); });
 
+	auto FindHeaderOrInsert = [&defaultRequestHeaders](const char* key, const char* value){
+		if (defaultRequestHeaders.find(key) == defaultRequestHeaders.cend())
+		{
+			defaultRequestHeaders.emplace(key, value);
+		}
+	};
 
-	// -H 'Sec-Fetch-Dest: document'
-	// -H 'Sec-Fetch-Mode: navigate' 
-	// -H 'Sec-Fetch-Site: cross-site' 
-	// -H 'Priority: u=0, i'
-	defaultRequestHeaders.emplace("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-	defaultRequestHeaders.emplace("Accept-Language", "en-US;q=1");
-	defaultRequestHeaders.emplace("Accept-Encoding", "gzip");
-	defaultRequestHeaders.emplace("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0");
 
 	url::url_view boostUrlView;
-	auto [urlHost, urlPath] = cooker_url_utils_ns::SplitUrlIntoOriginAndPath(url, boostUrlView);
+	auto [urlOrigin, urlPath] = cooker_url_utils_ns::SplitUrlIntoOriginAndPath(url, boostUrlView);
 
 	if (urlPath.empty())
 	{
 		urlPath = "/";
 	}
 
-	httplib::Client simpleClient(urlHost);
-	simpleClient.enable_server_certificate_verification(false);
-	std::cerr << "Client certificate verification disabled!\n";
-	
-	simpleClient.set_compress(true);
-	
+	httplib::Client simpleClient(urlOrigin);
+
+	std::string strCaCertPath
+		, strCaCertDir;
+
+	if (simpleClient.is_ssl())
+	{
+		if (strCaCertFilepath.empty())
+		{
+			std::cerr << "Error: Certificate path must be specified!\n";
+			return EXIT_FAILURE;
+		}
+		
+		simpleClient.set_ca_cert_path(strCaCertFilepath);
+	}
+
+	auto OverwriteHeader = [&defaultRequestHeaders](const char* key, const char* value){
+		if (httplib::Headers::const_iterator iter = defaultRequestHeaders.find(key);
+				iter != defaultRequestHeaders.cend())
+		{
+			defaultRequestHeaders.erase(iter);
+			defaultRequestHeaders.emplace(key, value);
+		}
+	};
+
 	// check method correctness :
-	httplib::Result httpResult = InvokeHTTPMethod(method, simpleClient, 
+	// -H 'Sec-Fetch-Dest: document'
+	// -H 'Sec-Fetch-Mode: navigate' 
+	// -H 'Sec-Fetch-Site: cross-site' 
+	// -H 'Priority: u=0, i'
+	FindHeaderOrInsert("Host", to_string(boostUrlView.host()).c_str());
+	FindHeaderOrInsert("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+	FindHeaderOrInsert("Accept-Language", "en-US;q=1");
+	FindHeaderOrInsert("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0");
+
+	simpleClient.set_compress(true);
+	OverwriteHeader("Accept-Encoding", "gzip");
+
+	httplib::Result httpResult = InvokeHTTPMethod(method, simpleClient,
 		urlPath, defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
 
 	auto in_range = [](int number, int lower, int upper){
@@ -1519,8 +1564,8 @@ int main(int argc, char const *argv[])
 
 	if (!httpResult)
 	{
-		std::cerr << "Request (" << method << " " << url << ") failed! " << 
-			httplib::to_string(httpResult.error()) << '\n';
+		std::cerr << "> " << method << " " << url << " failed! " << 
+			httplib::to_string(httpResult.error()) << "\n\n";
 		return EXIT_FAILURE;
 	}
 
@@ -1543,6 +1588,13 @@ int main(int argc, char const *argv[])
 
 			typename httplib::Headers::const_iterator 
 				locationHTTPHeader = httpResult->headers.find("Location");
+
+			if (locationHTTPHeader == httpResult->headers.cend())
+			{
+				std::cout << "Redirect HTTP status but not any `Location' header in response!\n";
+				break;
+			}
+
 			const std::string& locationUrl = locationHTTPHeader->second;
 			result<url::url_view> parsedLocationUrlResult = url::parse_uri_reference(locationUrl);
 			if (!parsedLocationUrlResult)
@@ -1561,7 +1613,18 @@ int main(int argc, char const *argv[])
 			{
 				/* path changes, need to new client */
 				simpleClient.operator=(httplib::Client(to_string(boostLocationUrlView.encoded_origin())));
-				simpleClient.enable_server_certificate_verification(false);
+				
+				if (simpleClient.is_ssl())
+				{
+					if (strCaCertFilepath.empty())
+					{
+						std::cerr << "Error: Certificate path must be specified!\n";
+						return EXIT_FAILURE;
+					}
+
+					simpleClient.set_ca_cert_path(strCaCertFilepath);
+				}
+
 				urlPath = boostLocationUrlView.encoded_resource();
 				url = locationUrl;
 			} else if (boostLocationUrlView.is_path_absolute()) // absolute url
@@ -1588,8 +1651,8 @@ int main(int argc, char const *argv[])
 				defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
 			if (!httpResult)
 			{
-				std::cerr << "Request (" << method << " " << url << ") failed! " << 
-					httplib::to_string(httpResult.error()) << '\n';
+				std::cerr << "> " << method << " " << url << " failed! " << 
+					httplib::to_string(httpResult.error()) << "\n\n";
 				return EXIT_FAILURE;
 			}
 
@@ -1601,5 +1664,6 @@ int main(int argc, char const *argv[])
 	}
 
 	PrettyPrintCookies(cookies);
+
 	return EXIT_SUCCESS;
 }
