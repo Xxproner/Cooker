@@ -3,6 +3,11 @@
 #include <string.h> // strncasecmp()
 #include <ctype.h> // tolower(), isdigit()
 #include <errno.h> // strerror(), errno
+#include <assert.h>
+#include <sys/stat.h>
+
+
+#include "sqlite3.h"
 
 
 #include <iostream>
@@ -22,6 +27,8 @@
 #include <set>
 #include <filesystem>
 #include <functional> // bind()
+#include <memory>
+#include <future> // async()
 
 
 template <typename Enum>
@@ -352,52 +359,10 @@ namespace cooker_details
 };
 
 
-/* optimized for domain entity */
-// struct persistent_string
-// {
-// private:
-// 	// different string and number same chars 
-// 	// > 0 start equal
-// 	// < 0 tail equal
-// 	// prefer greater number, if strings have equal same head and tail
-// 	std::vector<std::pair<std::string, ssize_t>> m_container;
-// public:
-// 	persistent_string(std::string init_string)
-// 	{
-// 		m_container.reserve(4);
-// 		m_container.front() = std::make_pair(std::move(init_string), 0);
-// 	};
-
-
-
-// 	persistent_string& operator=(std::string snapshot_string)
-// 	{
-// 		// std::string& prev_string = m_container.back().first;
-// 	// 	std::pair<std::string::const_iterator, std::string::const_iterator> mismatchRes =
-// 	// 		std::mismatch(prev_string.cbegin(), prev_string.cend(),
-// 	// 			snapshot_string.cbegin(), snapshot_string.cend());
-
-// 	// 	const auto sameHeadCharsNum = std::distance(prev_string.cbegin(), mismatchRes.first);
-// 	// 	if ()
-// 	// 	{
-
-// 	// 	}
-// 		if (m_container.back().first != snapshot_string)
-// 		{
-// 			m_container.back() = std::make_pair(std::move(init_string), 0);
-// 		}
-// 		return *this;
-// 	};
-
-// 	friend 
-// 	void PrettyPrintCookies(const CookieDNSJar& cookieDNSJar);
-// };
-
-
 
 struct Cookie
 {
-	std::string m_key;
+	std::string m_name;
 	std::string m_value;
 
 	static std::string defaultSameSiteValue;
@@ -405,6 +370,7 @@ struct Cookie
 	std::string m_domain;
 
 	std::chrono::system_clock::time_point m_expires;
+	constexpr static const char* timeFormat = "%d %b %Y %T";
 	std::string m_path;
 	
 	// persistent container
@@ -429,7 +395,7 @@ public:
 
 
 	Cookie(Cookie&& cookie)
-		: m_key(std::move(cookie.m_key))
+		: m_name(std::move(cookie.m_name))
 		, m_value(std::move(cookie.m_value))
 		, m_sameSite(cookie.m_sameSite)
 		, m_domain(std::move(cookie.m_domain))
@@ -452,7 +418,7 @@ public:
 	{
 		assert(cookie.m_domain == m_domain && 
 			cookie.m_path == m_path &&
-				cookie.m_key == m_key &&
+				cookie.m_name == m_name &&
 					"Fatal logic error! Overwriting cookies with same Path, Domain attrubute only");
 
 		// auto oldSetCookieOrigin = std::move(m_setCookieOrigin);
@@ -527,6 +493,58 @@ public:
 	};
 
 
+
+	static
+	void CheckCookiePolicy(Cookie& cookie, const url::url_view& boostUrlView)
+	{
+		if (cookie.m_path.empty() || (cookie.m_path[0] != '/'))
+		{
+			cookie.SetDefaultPath(boostUrlView.path());
+		}
+
+
+		if (cookie.m_isHosted && (cookie.m_path != "/" || !cookie.m_domain.empty() || 
+					!cookie.m_secure))
+		{
+			throw Cookie::cookie_policy_error("__Host attr error!");
+		}
+
+		if (cookie.m_secure && boostUrlView.scheme() != "https") 
+		{
+			constexpr const char* SecureAttrFromHTTPError = "Insecure site "
+					 "cannot set cookies with the `Secure' attribute!"; 
+			throw Cookie::cookie_policy_error(SecureAttrFromHTTPError);
+		}
+
+
+		std::string urlHost = boostUrlView.host();
+		if (!cookie.m_domain.empty() && 
+				!cooker_url_utils_ns::IsSubdomain(urlHost, cookie.m_domain))
+		{
+			throw Cookie::cookie_policy_error("Only the current domain can be set as the value,"
+				" or a domain of a higher order");
+		} else if (cookie.m_domain.empty())
+		{
+			cookie.m_isOnlyCurrDomain = true;
+			cookie.m_domain = std::move(urlHost);
+		} else 
+		{
+			/* convert the cookie-domain to lower case */
+			for (auto& ch : cookie.m_domain)
+			{
+				ch = std::tolower(ch);
+			}
+		}
+
+		if (cookie.m_partitioned && !cookie.m_secure)
+		{
+			if (!cookie.m_secure)
+			{
+				throw Cookie::cookie_policy_error("Partitioned attribute "
+					"must be set with `Secure'");
+			}
+		}
+	}
 
 
 	// inherit from it?
@@ -685,6 +703,15 @@ public:
 private:
 	BOOST_TTI_HAS_MEMBER_FUNCTION(find);
 public:
+	std::string
+	GetStrCreatedTime()
+	{
+		std::string timeString; timeString.reserve(48);
+		time_t time_tCookieCreated = std::chrono::system_clock::to_time_t(m_expires);
+		strftime(timeString.data(), timeString.size(), timeFormat, 
+			std::localtime(&time_tCookieCreated));
+		return timeString;
+	}
 
 	/**
 	 * considered param is a VALID `Set-Cookie' header value! 
@@ -729,7 +756,7 @@ public:
 			cookieNamePos += std::strlen(securePrefix);
 		}
 
-		cookie.m_key = cookieNameValue.substr(cookieNamePos, cookieNameValueDelimPos - cookieNamePos);
+		cookie.m_name = cookieNameValue.substr(cookieNamePos, cookieNameValueDelimPos - cookieNamePos);
 		cookie.m_value = cookieNameValue.substr(cookieNameValueDelimPos + 1);
 		/* end parsing <cookie-name>=<cookie-value> */
 
@@ -1029,130 +1056,78 @@ CookieUrlTree* ForceFindCookieUrlTree(CookieDNSJar& cookieJar, const std::string
 
 
 
-const Cookie&
-AddCookieToJar(CookieDNSJar& cookieJar, Cookie&& cookie)
+std::string
+CreateQuery(const char* format, ...)
 {
-	CookieUrlTree* cookieTreePtr = ForceFindCookieUrlTree(cookieJar, cookie.m_domain);
-
-	/*const*/ auto cookiesRangeEqPath = cookieTreePtr->equal_range(cookie.m_path);
-	const std::size_t cookiesEqPathNum = std::distance(
-		cookiesRangeEqPath.first, cookiesRangeEqPath.second);
-
-	if (cookiesEqPathNum == 0) // this path does not exists
-	{
-		return cookieTreePtr->emplace(std::move(cookie)).operator*();
-	} // else ...
-
-	/* check exists cookie with same key */
-	typename CookieUrlTree::iterator sameKeyCookieIter = std::find_if(cookiesRangeEqPath.first, cookiesRangeEqPath.second, 
-		[&cookie](const typename CookieUrlTree::value_type& i_cookie){
-			return cookie.m_key == i_cookie.m_key;
-	});
-
-	if (sameKeyCookieIter != cookiesRangeEqPath.second)
-	{
-		// overwrite cookie
-		// path will not be changed
-		// *sameKeyCookieIter = std::move(cookie);
-
-		// workaround ...
-		typename CookieUrlTree::node_type cookieTreeNode = cookieTreePtr->extract(sameKeyCookieIter);
-		assert(!cookieTreeNode.empty() && "Fatal logic error! Call value() mem_fn on empty node object is ub!");
-		cookieTreeNode.value() = std::move(cookie);
-		sameKeyCookieIter = cookieTreePtr->insert(std::move(cookieTreeNode));
-	} else
-	{
-		sameKeyCookieIter = 
-			cookieTreePtr->emplace_hint(cookiesRangeEqPath.first, std::move(cookie));
-	}
-
-	return sameKeyCookieIter.operator*();
+	std::string rq;
+	va_list args, args2;
+	va_start(args, format);
+	va_copy(args2, args);
+	const std::size_t rqLen = vsnprintf(nullptr, 0, format, args2);
+	rq.reserve(rqLen + 1);
+	vsnprintf(rq.data(), rqLen + 1, format, args);
+	return rq;
 };
 
 
 
-CookieDNSJar GrapCookies(const httplib::Headers& headers,
-	const std::string& requestUrl)
+int
+StorageCookie(sqlite3* dbConn, Cookie&& cookie)
+__attribute__((nonnull(1)));
+
+
+
+int
+StorageCookie(sqlite3* dbConn, Cookie&& cookie)
 {
-	CookieDNSJar cookieJar;
+	constexpr int STORAGE_FAILED_CODE = -1;
 
-	auto rangeCookies = headers.equal_range("Set-Cookie");
-	boost::system::result<url::url_view> parseUriRefResult = url::parse_uri_reference(requestUrl);
-		assert(parseUriRefResult && "parse_uri_reference() failed!");
-	auto& boostUrlView = parseUriRefResult.value();
+	std::string strSameCookieCondition = CreateQuery(" WHERE name=%s, path=%s, domain=%s", 
+		cookie.m_name.c_str(), cookie.m_path.c_str(), cookie.m_domain.c_str());
+	std::string findExistCookieRq = std::string("SELECT creation_time FROM cookies") + strSameCookieCondition;
 
-	for ( ; rangeCookies.first != rangeCookies.second; rangeCookies.first++)
+	// callbackValue, number of columns, values of columns, names of columns
+	auto callback_1 = [](void* callbackValue, int columnsNum, char** values, char** columnsNames){
+		*reinterpret_cast<std::pair<int, std::string>*>(callbackValue) = std::make_pair(1, std::string(values[0]));
+		return 1;
+	};
+
+	std::pair<int, std::string> pSameCookieExistFlag_ItsCreationTime;
+	if (int queryExecCode = sqlite3_exec(dbConn, findExistCookieRq.c_str(), 
+		+callback_1, reinterpret_cast<void*>(&pSameCookieExistFlag_ItsCreationTime), nullptr);
+			queryExecCode != SQLITE_OK)
 	{
-		auto setCookieHeaderValue = rangeCookies.first->second;
-		try
-		{
-			Cookie cookie = Cookie::ParseSetCookieHeaderValue(setCookieHeaderValue);
-
-			// check process path
-			if (cookie.m_path.empty() || (cookie.m_path[0] != '/'))
-			{
-				cookie.SetDefaultPath(boostUrlView.path());
-			}
-
-
-			if (cookie.m_isHosted)
-			{
-				assert(cookie.m_path == "/" && 
-					cookie.m_domain.empty() && 
-						cookie.m_secure);
-				/* otherwise */
-				throw Cookie::cookie_policy_error("__Host attr error!");
-			}
-		
-			if (cookie.m_secure && boostUrlView.scheme() != "https") 
-			{
-				constexpr const char* SecureAttrFromHTTPError = "Insecure site "
-						 "cannot set cookies with the `Secure' attribute!"; 
-				throw Cookie::cookie_policy_error(SecureAttrFromHTTPError);
-			}
-		
-
-			std::string urlHost = boostUrlView.host();
-			if (!cookie.m_domain.empty() && 
-					!cooker_url_utils_ns::IsSubdomain(urlHost, cookie.m_domain))
-			{
-				throw Cookie::cookie_policy_error("Only the current domain can be set as the value,"
-					" or a domain of a higher order");
-			} else if (cookie.m_domain.empty())
-			{
-				cookie.m_isOnlyCurrDomain = true;
-				cookie.m_domain = std::move(urlHost);
-			} else 
-			{
-				/* convert the cookie-domain to lower case */
-				for (auto& ch : cookie.m_domain)
-				{
-					ch = std::tolower(ch);
-				}
-			}
-
-			if (cookie.m_partitioned && !cookie.m_secure)
-			{
-				if (!cookie.m_secure)
-				{
-					throw Cookie::cookie_policy_error("Partitioned attribute "
-						"must be set with `Secure'");
-				}
-			}
-
-			// decode ptc_string_view (a reference precent-encoded strings)
-			url::decode_view urlTarget = *boostUrlView.encoded_target();
-			cookie.m_setCookieOrigin.assign(urlTarget.begin(), urlTarget.end());
-			AddCookieToJar(cookieJar, std::move(cookie));
-		} catch(const Cookie::cookie_policy_error& cookiePolicyError)
-		{
-			std::cerr << "Warning: Cookie (" << setCookieHeaderValue << ") from "  << requestUrl << 
-				" is REJECTED. Reason: " <<
-					cookiePolicyError.what() << "\n\n";
-		}
+		return queryExecCode;
 	}
 
-	return cookieJar;
+	findExistCookieRq.clear();
+
+	std::string createdCookieTimeStr;
+	if (pSameCookieExistFlag_ItsCreationTime.first)
+	{
+		std::string deleteOldCookieRq = std::string("DELETE FROM cookies") + strSameCookieCondition;
+		sqlite3_exec(dbConn, deleteOldCookieRq.c_str(), nullptr, nullptr, nullptr);
+		
+		createdCookieTimeStr = cookie.GetStrCreatedTime();
+	} else
+	{
+		/*createdCookieTimeStr = ;*/
+	}
+
+	// TODO: Canonicalized Host Names!
+	std::string insertCookieRq = CreateQuery("INSERT INTO cookies VALUES ("
+		"%s, %s, %s, %s, %s, %s, %d, %d, %d, %d);", cookie.m_name.c_str(), cookie.m_value.c_str(), cookie.m_domain.c_str(),
+			cookie.m_path.c_str(), createdCookieTimeStr.c_str(), createdCookieTimeStr.c_str(), 
+			cookie.m_domain.empty(), cookie.m_secure, 
+			cookie.m_httpOnly, static_cast<int>(cookie.m_isSessional));
+
+	if (int queryExecCode = sqlite3_exec(dbConn, insertCookieRq.c_str(), nullptr, nullptr, nullptr);
+			queryExecCode != SQLITE_OK)
+	{
+		return queryExecCode;
+	}
+
+	return 0;
 };
 
 
@@ -1207,7 +1182,7 @@ std::string ManageCookies(CookieDNSJar& cookieJar, const std::string& url)
 			if (!cookie->IsObseleted() && Cookie::PolicyCookiePath(cookie->m_path, boostUrlView.path()) &&
 					(!cookie->m_secure || boostUrlView.scheme() == "https"))
 			{
-				cookieHeaderValue.append(cookie->m_key).append("=")
+				cookieHeaderValue.append(cookie->m_name).append("=")
 					.append(cookie->m_value).append("; ");
 			}
 		}
@@ -1243,67 +1218,38 @@ std::string to_string(const url::pct_string_view& pctStringView)
 
 
 
-void PrettyPrintCookies(const CookieDNSJar& cookieDNSJar)
+/**
+ * @brief print cookies callback
+ * */
+int PrettyPrintCookies(void*, int, char** values, char** columnsNames)
 {
-	// just print, TODO : pretty print)
-	// cookie token delim
-	std::cout << "Cookies: \n";
-	constexpr const char* ctd = "; ";
-	for (const auto& pDomain_CookieUrlTree : cookieDNSJar)
+	std::cout << values[0] << "=" << values[1];
+	std::cout << "; Domain=" << values[2];
+	std::cout << "; Path=" << values[3];
+
+	std::cout << "; Expires=";
+	if (std::atoi(values[9]))
 	{
-		// key=value; domain; path; samesite; expires; secure; httponly; partitioned
-		for (const auto& cookie : pDomain_CookieUrlTree.second)
-		{
+		std::cout << values[4];
+	} else
+	{
+		std::cout << "Sessional";
+	}
 
-			std::cout << cookie.m_key << "=" << cookie.m_value << ctd;
-			if (!cookie.IsOnlyCurrectDomain())
-			{
-				std::cout << "Domain=" << cookie.m_domain << ctd;
-			}
+	std::cout << "; creation-time=" << values[5];
+	std::cout << "; last-access-time" << values[6];
 
-			if (!cookie.m_path.empty())
-			{
-				std::cout << "Path=" << cookie.m_path << ctd;
-			}
+	if (std::atoi(values[7]))
+	{
+		std::cout << "; Secure";
+	}
 
-			std::cout << "SameSize=" << cookie.m_sameSite << ctd;
-		
-			std::cout << "Expires=";
-			if (!cookie.IsSessional())
-			{
-				constexpr std::size_t kBufSize = 1 << 6;
-				char buffer[kBufSize]; 
-				const time_t cookieExpiresTime = std::chrono::system_clock::to_time_t(
-					cookie.m_expires);
-				std::strncpy(buffer, ctime(&cookieExpiresTime), 24);
-				buffer[24] = 0; //remove `\n'
-				std::cout << buffer;
-			} else
-			{
-				std::cout << "Sessional";
-			}
+	if (std::atoi(values[8]))
+	{
+		std::cout << "; HttpOnly\n";
+	}
 
-			std::cout << ctd;
-
-			if (cookie.m_secure)
-			{
-				std::cout << "Secure" << ctd;
-			}
-
-			if (cookie.m_httpOnly)
-			{
-				std::cout << "HttpOnly" << ctd;
-			}
-
-
-			if (cookie.m_partitioned)
-			{
-				std::cout << "Partitioned";
-			}
-
-			std::cout << '\n';
-		}
-	}			
+	return 0;
 };
 
 
@@ -1318,17 +1264,6 @@ void MergeCookies(CookieDNSJar& cookieJar, CookieDNSJar&& mergingCookies)
 		cookieUrlTree->merge(std::move(pDomain_CookieUrlTree.second));
 	}
 };
-
-
-
-// void PrintTraceInfo(const std::string& version, int status, const std::string& method, 
-// 	const std::string& reason, const std::string& url)
-// {
-// 	(void)url;
-// 	(void)method;
-// 	std::cout << "> Request processed: " << version  << " " << status << " " << 
-// 		reason << std::endl << std::endl;
-// };
 
 
 
@@ -1434,39 +1369,25 @@ void TransformRedirectedMethod(std::string& method, int statusCode,
 
 
 void CookerLogger(const httplib::Request& req, const httplib::Response& res, 
-	int verboseMode)
-{
-	std::cout << "> " << req.method << ' ' << req.path << ' ' << res.version << '\n';
-	if (verboseMode)
-	{
-		for (const auto& [key, value] : req.headers)
-		{
-			std::cout << "> " << key << ' ' << value << '\n';
-		}			
-	}
-	std::cout << ">\n";
+	int verboseMode);
 
-	std::cout << "< " << res.version << ' ' << res.status << ' ' << res.reason << '\n';
-	if (verboseMode)
-	{
-		for (const auto& [key, value] : res.headers)
-		{
-			std::cout << "< " << key << ' ' << value << '\n';
-		}			
-	}
-	std::cout << "<\n";
-};
+
+
+auto CreateTable_cookies(sqlite3* dbConn)
+	-> decltype(SQLITE_OK)
+__attribute__((nonnull(1)));
 
 
 
 int main(int argc, char const *argv[])
 {
-std::string method = "GET"
-		, url
+	std::string method = "GET"
+		, requestUrl
 		, defaultSameSite
 		, data
 		, header
-		, strCaCertFilepath;
+		, strCaCertFilepath
+		, sqliteDBFilepath;
 
 
 	bool isShowHelpTip = false
@@ -1482,6 +1403,10 @@ std::string method = "GET"
 			["--follow-redirect"]["-l"]
 			("Automatic redirection to 3xx http status code location value")
 				.optional()
+		| lyra::opt(sqliteDBFilepath, "sqlite3 database")
+			["--database"]
+			("sqlite database file")
+				.required()
 		| lyra::opt(verboseMode)
 			["--verbose"]["-v"]
 			("Verbose mode")
@@ -1512,9 +1437,8 @@ std::string method = "GET"
 					["--data-raw"]["-d"]
 					("HTTP request content")
 						.optional()
-		| lyra::arg(url, "url")
+		| lyra::arg(requestUrl, "url")
 			("Destination url request").required();
-
 
 	auto parseResult = cliParser.parse({argc, argv});
 	if (!parseResult || isShowHelpTip)
@@ -1530,12 +1454,85 @@ std::string method = "GET"
 			std::move(defaultSameSite);
 	}
 
+	struct DBConnCloser
+	{
+		void operator()(sqlite3* sqliteConn) const
+		{
+			/* 	If sqlite3_close_v2() is called with unfinalized prepared statements, 
+				unclosed BLOB handlers, and/or unfinished sqlite3_backups, 
+				it returns SQLITE_OK regardless, but instead of deallocating the database connection immediately, 
+				it marks the database connection as an unusable "zombie" and 
+				makes arrangements to automatically deallocate the database connection after all prepared statements 
+				are finalized, all BLOB handles are closed, and all backups have finished. 
+			*/
+			if (sqlite3_close(sqliteConn) != SQLITE_OK);
+			{
+				std::cerr << "Cannot close sqlite3 connection!\n";
+			}
+		}
+	};
+
+	
+	sqlite3* cookieStoragePtr = nullptr;
+	auto openDBConnFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX;
+	// check file is exists
+
+	struct stat unused_1;
+	if (stat(sqliteDBFilepath.c_str(), &unused_1) == -1)
+	{
+		// no such file or directory or system error
+		if (errno != EINVAL)
+		{
+			std::cerr << "stat() failed: " << strerror(errno) << std::endl;
+			return EXIT_FAILURE;
+		}
+
+		openDBConnFlags |= SQLITE_OPEN_CREATE;
+	}
+
+	if (sqlite3_open_v2(sqliteDBFilepath.c_str(), &cookieStoragePtr, 
+		openDBConnFlags, nullptr) != SQLITE_OK)
+	{
+		std::cerr << "Cannot open sqlite3 connection!\n";
+		return EXIT_FAILURE;
+	}
+
+	std::shared_ptr<sqlite3> cookiesStorage(std::exchange(cookieStoragePtr, nullptr), DBConnCloser());
+
+	bool isTableExists = false;
+	if (not (openDBConnFlags & SQLITE_OPEN_CREATE))
+	{
+		// check is cookies table exist
+		const char* checkTableExistRq = "SELECT name FROM sqlite_master WHERE type='table' AND name='cookies'";
+		if (int execCodeRq = sqlite3_exec(cookiesStorage.get(), checkTableExistRq, +[](void* flagPtr, int, char** values, char**){
+				if (values[0][0] != '\0')
+				{
+					*reinterpret_cast<bool*>(flagPtr) = true;
+				}
+				return 0;
+			}, reinterpret_cast<void*>(&isTableExists), nullptr); execCodeRq != SQLITE_OK)
+		{
+			std::cerr << "Request failed: " << sqlite3_errstr(execCodeRq) << std::endl;
+			return EXIT_FAILURE;
+		}
+	}
+
+
+	if (!isTableExists)
+	{
+		if (CreateTable_cookies(cookiesStorage.get()) != SQLITE_OK)
+		{
+			std::cerr << "Cannot create table 'cookies': " << "<none>" << std::endl;
+			return EXIT_FAILURE;
+		}
+	}
+
 	// capitalize method
 	std::for_each(method.begin(), method.end(), [](char& ch) { ch = std::toupper(ch); });
 
 
 	url::url_view boostUrlView;
-	auto [urlOrigin, urlPath] = cooker_url_utils_ns::SplitUrlIntoOriginAndPath(url, boostUrlView);
+	auto [urlOrigin, urlPath] = cooker_url_utils_ns::SplitUrlIntoOriginAndPath(requestUrl, boostUrlView);
 
 	if (urlPath.empty())
 	{
@@ -1593,110 +1590,189 @@ std::string method = "GET"
 		return (unsigned)(number - lower) <= (upper - lower);
 	};
 
-	if (!httpResult)
+	std::pair<httplib::Headers::const_iterator, 
+		httplib::Headers::const_iterator> setCookieHeadersRange = httpResult->headers.equal_range("Set-Cookie");
+	// std::vector<std::future<int>> vecFt; vecFt.reserve(std::distance(setCookieHeadersRange.first, 
+	// 	setCookieHeadersRange.second));
+	for ( ; setCookieHeadersRange.first != setCookieHeadersRange.second; ++setCookieHeadersRange.first)
 	{
-		std::cerr << "> " << method << " " << url << " failed! " << 
-			httplib::to_string(httpResult.error()) << "\n\n";
-		return EXIT_FAILURE;
-	}
-
-	CookieDNSJar cookies = GrapCookies(httpResult->headers, url);
-	// PrintTraceInfo(httpResult->version, httpResult->status, method, 
-	// 	httpResult->reason, url);
-
-	if (followRedirect)
-	{
-		typename httplib::Headers::const_iterator cookieHeaderIter = defaultRequestHeaders.cend();
-		while (in_range(httpResult->status, http::MultipleChoices_300, http:: MultipleChoices_300 + 99))
+		const httplib::Headers::value_type& setCookieHeader = 
+			*setCookieHeadersRange.first;
+		try
 		{
-			if (cookieHeaderIter != defaultRequestHeaders.cend())
-			{
-				// remove previous `Cookie' header
-				defaultRequestHeaders.erase(cookieHeaderIter);
-			}
+			Cookie cookie = Cookie::ParseSetCookieHeaderValue(setCookieHeader.second);
 
-			TransformRedirectedMethod(method, httpResult->status, defaultRequestHeaders);
+			// check process path
+			Cookie::CheckCookiePolicy(cookie, boostUrlView);
 
-			typename httplib::Headers::const_iterator 
-				locationHTTPHeader = httpResult->headers.find("Location");
-
-			if (locationHTTPHeader == httpResult->headers.cend())
-			{
-				std::cout << "Redirect HTTP status but not any `Location' header in response!\n";
-				break;
-			}
-
-			const std::string& locationUrl = locationHTTPHeader->second;
-			result<url::url_view> parsedLocationUrlResult = url::parse_uri_reference(locationUrl);
-			if (!parsedLocationUrlResult)
-			{
-				std::cerr << "Invalid header `Location' value. It is rarely possible!\n";
-				PrettyPrintCookies(cookies);
-				return EXIT_FAILURE;
-			}
-
-			auto boostLocationUrlView = parsedLocationUrlResult.value();
-			
-			/* origin   = scheme://authority */
-			/* resource = /path?query#frag */
-			/* target   = /path?:query */
-			if (boostLocationUrlView.has_scheme()) // full url
-			{
-				/* path changes, need to new client */
-				simpleClient.operator=(httplib::Client(to_string(boostLocationUrlView.encoded_origin())));
-				simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
-				if (simpleClient.is_ssl())
-				{
-					if (strCaCertFilepath.empty())
-					{
-						std::cerr << "Error: Certificate path must be specified!\n";
-						return EXIT_FAILURE;
-					}
-
-					simpleClient.set_ca_cert_path(strCaCertFilepath);
-				}
-
-				urlPath = boostLocationUrlView.encoded_resource();
-				url = locationUrl;
-			} else if (boostLocationUrlView.is_path_absolute()) // absolute url
-			{
-				urlPath = locationUrl;
-				cooker_url_utils_ns::ReplaceUrlResource(url, locationUrl);
-			} else // relative path
-			{
-				urlPath = boostUrlView.path() + locationUrl;
-				cooker_url_utils_ns::RemoveQueryAndFrag(url); 
-				cooker_url_utils_ns::AppendPath(url, locationUrl);
-			}
-
-			std::string cookieHeaderValue = ManageCookies(cookies, url);
-			if (!cookieHeaderValue.empty())
-			{
-				cookieHeaderIter = defaultRequestHeaders.emplace("Cookie", std::move(cookieHeaderValue));
-			} else
-			{
-				cookieHeaderIter = defaultRequestHeaders.cend();
-			}
-
-			std::cout << "> Redirecting to " << url << "\n\n";
-
-			httpResult = InvokeHTTPMethod(method, simpleClient, urlPath,
-				defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
-			if (!httpResult)
-			{
-				std::cerr << "> " << method << " " << url << " failed! " << 
-					httplib::to_string(httpResult.error()) << "\n\n";
-				return EXIT_FAILURE;
-			}
-
-			CookieDNSJar setCookies = GrapCookies(httpResult->headers, url);
-			// PrintTraceInfo(httpResult->version, httpResult->status,
-			// 	method, httpResult->reason, url);
-			MergeCookies(cookies, std::move(setCookies));
+			// decode ptc_string_view (a reference precent-encoded strings)
+			url::decode_view urlTarget = *boostUrlView.encoded_target();
+			cookie.m_setCookieOrigin.assign(urlTarget.begin(), urlTarget.end());
+			// vecFt.emplace_back(std::async(std::launch::async, StorageCookie, cookiesStorage.get(), std::move(cookie)));
+			StorageCookie(cookiesStorage.get(), std::move(cookie));
+		} catch(const Cookie::cookie_policy_error& cookiePolicyError)
+		{
+			std::cerr << "Warning: Cookie (" << setCookieHeader.second << ") from "  << requestUrl << 
+				" is REJECTED. Reason: " <<
+					cookiePolicyError.what() << "\n\n";
 		}
 	}
 
-	PrettyPrintCookies(cookies);
+	// std::for_each(vecFt.begin(), vecFt.end(), [](std::future<int>& futureObj){
+	// 	futureObj.wait();
+	// 	int storageCookieExecCode = futureObj.get();
+	// 	if (storageCookieExecCode != SQLITE_OK)
+	// 	{
+	// 		std::cerr << "Storage cookie failed: " << 
+	// 			sqlite3_errstr(storageCookieExecCode) << std::endl;
+	// 	}
+	// });
+
+	// if (followRedirect)
+	// {
+	// 	typename httplib::Headers::const_iterator cookieHeaderIter = defaultRequestHeaders.cend();
+	// 	while (in_range(httpResult->status, http::MultipleChoices_300, http:: MultipleChoices_300 + 99))
+	// 	{
+	// 		if (cookieHeaderIter != defaultRequestHeaders.cend())
+	// 		{
+	// 			// remove previous `Cookie' header
+	// 			defaultRequestHeaders.erase(cookieHeaderIter);
+	// 		}
+
+	// 		TransformRedirectedMethod(method, httpResult->status, defaultRequestHeaders);
+
+	// 		typename httplib::Headers::const_iterator 
+	// 			locationHTTPHeader = httpResult->headers.find("Location");
+
+	// 		if (locationHTTPHeader == httpResult->headers.cend())
+	// 		{
+	// 			std::cout << "Redirect HTTP status but not any `Location' header in response!\n";
+	// 			break;
+	// 		}
+
+	// 		const std::string& locationUrl = locationHTTPHeader->second;
+	// 		result<url::url_view> parsedLocationUrlResult = url::parse_uri_reference(locationUrl);
+	// 		if (!parsedLocationUrlResult)
+	// 		{
+	// 			std::cerr << "Invalid header `Location' value. It is rarely possible!\n";
+	// 			sqlite3_exec()
+	// 			// PrettyPrintCookies(cookies);
+	// 			return EXIT_FAILURE;
+	// 		}
+
+	// 		auto boostLocationUrlView = parsedLocationUrlResult.value();
+			
+	// 		/* origin   = scheme://authority */
+	// 		/* resource = /path?query#frag */
+	// 		/* target   = /path?:query */
+	// 		if (boostLocationUrlView.has_scheme()) // full url
+	// 		{
+	// 			/* path changes, need to new client */
+	// 			simpleClient.operator=(httplib::Client(to_string(boostLocationUrlView.encoded_origin())));
+	// 			simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
+	// 			if (simpleClient.is_ssl())
+	// 			{
+	// 				if (strCaCertFilepath.empty())
+	// 				{
+	// 					std::cerr << "Error: Certificate path must be specified!\n";
+	// 					return EXIT_FAILURE;
+	// 				}
+
+	// 				simpleClient.set_ca_cert_path(strCaCertFilepath);
+	// 			}
+
+	// 			urlPath = boostLocationUrlView.encoded_resource();
+	// 			url = locationUrl;
+	// 		} else if (boostLocationUrlView.is_path_absolute()) // absolute url
+	// 		{
+	// 			urlPath = locationUrl;
+	// 			cooker_url_utils_ns::ReplaceUrlResource(url, locationUrl);
+	// 		} else // relative path
+	// 		{
+	// 			urlPath = boostUrlView.path() + locationUrl;
+	// 			cooker_url_utils_ns::RemoveQueryAndFrag(url); 
+	// 			cooker_url_utils_ns::AppendPath(url, locationUrl);
+	// 		}
+
+	// 		std::string cookieHeaderValue = ManageCookies(cookies, url);
+	// 		if (!cookieHeaderValue.empty())
+	// 		{
+	// 			cookieHeaderIter = defaultRequestHeaders.emplace("Cookie", std::move(cookieHeaderValue));
+	// 		} else
+	// 		{
+	// 			cookieHeaderIter = defaultRequestHeaders.cend();
+	// 		}
+
+	// 		std::cout << "> Redirecting to " << url << "\n\n";
+
+	// 		httpResult = InvokeHTTPMethod(method, simpleClient, urlPath,
+	// 			defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
+	// 		if (!httpResult)
+	// 		{
+	// 			std::cerr << "> " << method << " " << url << " failed! " << 
+	// 				httplib::to_string(httpResult.error()) << "\n\n";
+	// 			return EXIT_FAILURE;
+	// 		}
+
+	// 		CookieDNSJar setCookies = GrapCookies(httpResult->headers, url);
+	// 		// PrintTraceInfo(httpResult->version, httpResult->status,
+	// 		// 	method, httpResult->reason, url);
+	// 		MergeCookies(cookies, std::move(setCookies));
+	// 	}
+	// }
+
+	if (sqlite3_exec(cookiesStorage.get(), "SELECT * FROM cookies", &PrettyPrintCookies, nullptr, nullptr) != SQLITE_OK)
+	{
+		std::cerr << "Request failed!\n";
+		return EXIT_FAILURE;
+	}
 
 	return EXIT_SUCCESS;
+}
+
+
+
+void CookerLogger(const httplib::Request& req, const httplib::Response& res, 
+	int verboseMode)
+{
+	std::cout << "> " << req.method << ' ' << req.path << ' ' << res.version << '\n';
+	if (verboseMode)
+	{
+		for (const auto& [key, value] : req.headers)
+		{
+			std::cout << "> " << key << ' ' << value << '\n';
+		}			
+	}
+	std::cout << ">\n";
+
+	std::cout << "< " << res.version << ' ' << res.status << ' ' << res.reason << '\n';
+	if (verboseMode)
+	{
+		for (const auto& [key, value] : res.headers)
+		{
+			std::cout << "< " << key << ' ' << value << '\n';
+		}			
+	}
+	std::cout << "<\n";
+};
+
+
+
+auto CreateTable_cookies(sqlite3* dbConn)
+	-> decltype(SQLITE_OK)
+{
+	const char* createTableRq = "CREATE TABLE cookies ("
+		"name VARCHAR(255) NOT NULL,"
+		"value VARCHAR(255) NOT NULL,"
+		"domain VARCHAR(127) NOT NULL,"
+		"path VARCHAR(127) NOT NULL,"
+		"expires VARCHAR(63) NOT NULL,"
+		"creation_time VARCHAR(63) NOT NULL,"
+		"last_access_time VARCHAR(63) NOT NULL,"
+		"host INT NOT NULL,"
+		"secure INT NOT NULL,"
+		"httpOnly INT NOT NULL,"
+		"persistent INT NOT NULL);";
+
+	return sqlite3_exec(dbConn, createTableRq, nullptr, nullptr, nullptr);
 }
