@@ -47,10 +47,10 @@ auto to_underlying(Enum e)
 #include "boost/url.hpp"
 #include "boost/url/pct_string_view.hpp"
 namespace url = boost::urls;
+#include "boost/utility/string_view.hpp"
 
-#include "boost/system.hpp"
 #include "boost/tti/has_member_function.hpp"
-
+#include "boost/system.hpp"
 
 #include "lyra.hpp"
 
@@ -368,21 +368,21 @@ struct Cookie
 	static std::string defaultSameSiteValue;
 	std::string m_sameSite;
 	std::string m_domain;
+	std::string m_path;
 
+	std::chrono::system_clock::time_point m_creationTime;
 	std::chrono::system_clock::time_point m_expires;
 	constexpr static const char* timeFormat = "%d %b %Y %T";
-	std::string m_path;
 	
-	// persistent container
-	std::string /*persistent_string*/ m_setCookieOrigin;
+	// persistent string
+	std::string m_cookieLocation;
 
-	bool m_isSessional;
+	bool m_persistent;
 	bool m_secure;
 	bool m_httpOnly;
 	/* TODO: */
 	bool m_partitioned;
-	bool m_isHosted;
-	bool m_isOnlyCurrDomain;
+	bool m_hostOnly;
 private:
 	Cookie() = default;
 public:
@@ -401,13 +401,12 @@ public:
 		, m_domain(std::move(cookie.m_domain))
 		, m_expires(std::move(cookie.m_expires))
 		, m_path(std::move(cookie.m_path))
-		, m_setCookieOrigin(std::move(cookie.m_setCookieOrigin))
-		, m_isSessional(cookie.m_isSessional)
+		, m_cookieLocation(std::move(cookie.m_cookieLocation))
+		, m_persistent(cookie.m_persistent)
 		, m_secure(cookie.m_secure)
 		, m_httpOnly(cookie.m_httpOnly)
 		, m_partitioned(cookie.m_partitioned)
-		, m_isHosted(cookie.m_isHosted)
-		, m_isOnlyCurrDomain(cookie.m_isOnlyCurrDomain)
+		, m_hostOnly(cookie.m_hostOnly)
 	{
 		// nothing
 	};
@@ -421,10 +420,10 @@ public:
 				cookie.m_name == m_name &&
 					"Fatal logic error! Overwriting cookies with same Path, Domain attrubute only");
 
-		// auto oldSetCookieOrigin = std::move(m_setCookieOrigin);
+		// auto oldSetCookieOrigin = std::move(m_cookieLocation);
 		this->~Cookie();
 		::new (reinterpret_cast<void*>(this)) Cookie(std::move(cookie));
-		// oldSetCookieOrigin = std::move(m_setCookieOrigin);
+		// oldSetCookieOrigin = std::move(m_cookieLocation);
 		return *this; 
 	};
 
@@ -457,13 +456,12 @@ public:
 		/* initialization */
 		cookie.m_secure 				= false;
 		cookie.m_httpOnly 				= false;
-		cookie.m_isSessional 			= false;
+		cookie.m_persistent 			= false;
 		cookie.m_partitioned 			= false;
-		cookie.m_isHosted 				= false;
-		cookie.m_isOnlyCurrDomain 		= false;
-		// cookie.m_parseSetCookieError	= false;
+		cookie.m_hostOnly 				= false;
 
-	  	cookie.m_sameSite = GetDefaultSameSiteValue();
+		cookie.m_creationTime 			= std::chrono::system_clock::now();
+	  	cookie.m_sameSite 				= GetDefaultSameSiteValue();
 		return cookie;
 	}
 
@@ -502,13 +500,6 @@ public:
 			cookie.SetDefaultPath(boostUrlView.path());
 		}
 
-
-		if (cookie.m_isHosted && (cookie.m_path != "/" || !cookie.m_domain.empty() || 
-					!cookie.m_secure))
-		{
-			throw Cookie::cookie_policy_error("__Host attr error!");
-		}
-
 		if (cookie.m_secure && boostUrlView.scheme() != "https") 
 		{
 			constexpr const char* SecureAttrFromHTTPError = "Insecure site "
@@ -518,6 +509,13 @@ public:
 
 
 		std::string urlHost = boostUrlView.host();
+
+		// public prefix must be rejected!
+		if (cookie.m_domain.find('.') == std::string::npos)
+		{
+			throw Cookie::cookie_policy_error("Public prefix cannot be domain-attribute value!");
+		}
+
 		if (!cookie.m_domain.empty() && 
 				!cooker_url_utils_ns::IsSubdomain(urlHost, cookie.m_domain))
 		{
@@ -525,7 +523,7 @@ public:
 				" or a domain of a higher order");
 		} else if (cookie.m_domain.empty())
 		{
-			cookie.m_isOnlyCurrDomain = true;
+			cookie.m_hostOnly = true;
 			cookie.m_domain = std::move(urlHost);
 		} else 
 		{
@@ -547,7 +545,7 @@ public:
 	}
 
 
-	// inherit from it?
+
 	struct CookieTokenComparer
 	{
 		/* skip prefix whitespace and compare only length non terminal tokens 
@@ -703,15 +701,28 @@ public:
 private:
 	BOOST_TTI_HAS_MEMBER_FUNCTION(find);
 public:
-	std::string
-	GetStrCreatedTime()
+	static
+	std::string format(std::chrono::time_point<std::chrono::system_clock> tp)
 	{
-		std::string timeString; timeString.reserve(48);
-		time_t time_tCookieCreated = std::chrono::system_clock::to_time_t(m_expires);
-		strftime(timeString.data(), timeString.size(), timeFormat, 
+		std::string timeString; timeString.resize(48);
+		time_t time_tCookieCreated = std::chrono::system_clock::to_time_t(tp);
+		strftime(timeString.data(), timeString.size(), Cookie::timeFormat, 
 			std::localtime(&time_tCookieCreated));
 		return timeString;
 	}
+
+
+
+	static
+	std::chrono::time_point<std::chrono::system_clock> unformat(const std::string& formatStrTime)
+	{
+		struct tm tm; memset(&tm, 0, sizeof tm);
+		strptime(formatStrTime.c_str(), Cookie::timeFormat, &tm);
+		std::time_t calendarTime = mktime(&tm);
+		return std::chrono::system_clock::from_time_t(calendarTime);
+	}
+
+
 
 	/**
 	 * considered param is a VALID `Set-Cookie' header value! 
@@ -735,29 +746,31 @@ public:
 		// only <name>=<value>
 		const bool isCommonCookie = delimPos == std::string::npos;
 
-		std::string_view cookieNameValue(setCookieHeaderValue.data() + oldDelimPos, 
-			isCommonCookie ? setCookieHeaderValue.length() - oldDelimPos : delimPos - oldDelimPos);
-		std::size_t cookieNameValueDelimPos = cookieNameValue.find('=');
+		std::string_view cookieNameAndValue(setCookieHeaderValue.data() + oldDelimPos, 
+			(isCommonCookie ? setCookieHeaderValue.length() : delimPos) - oldDelimPos);
+		std::size_t cookieNameValueDelimPos = cookieNameAndValue.find('=');
 		/* considered it is success */
-		static const char* hostPrefix = "__Host-";
-		static const char* securePrefix = "__Secure-";
+		const char* hostPrefix = "__Host-";
+		const char* securePrefix = "__Secure-";
 
 		/* not possible both! */
+		bool 	cookieHasSecurePrefix = false,
+				cookieHasHostPrefix = false;
 		std::size_t cookieNamePos = oldDelimPos;
-		if (cooker_details::starts_with_case(cookieNameValue.data(), cookieNameValue.length(),
+		if (cooker_details::starts_with_case(cookieNameAndValue.data(), cookieNameAndValue.length(),
 				hostPrefix, std::strlen(hostPrefix)))
 		{
-			cookie.m_secure = true;
+			cookieHasHostPrefix = true;
 			cookieNamePos += std::strlen(hostPrefix);
-		} else if (cooker_details::starts_with_case(cookieNameValue.data(), cookieNameValue.length(),
+		} else if (cooker_details::starts_with_case(cookieNameAndValue.data(), cookieNameAndValue.length(),
 				securePrefix, std::strlen(securePrefix)))
 		{
-			cookie.m_isHosted = true;
+			cookieHasSecurePrefix = true;
 			cookieNamePos += std::strlen(securePrefix);
 		}
 
-		cookie.m_name = cookieNameValue.substr(cookieNamePos, cookieNameValueDelimPos - cookieNamePos);
-		cookie.m_value = cookieNameValue.substr(cookieNameValueDelimPos + 1);
+		cookie.m_name = cookieNameAndValue.substr(cookieNamePos, cookieNameValueDelimPos - cookieNamePos);
+		cookie.m_value = cookieNameAndValue.substr(cookieNameValueDelimPos + 1);
 		/* end parsing <cookie-name>=<cookie-value> */
 
 		if (isCommonCookie)
@@ -867,16 +880,25 @@ public:
 
 			cookie.m_expires = std::chrono::system_clock::now() + 
 				std::chrono::seconds(maxAge_s);
+			cookie.m_persistent = true;
 		} else if (!expires.empty())
 		{
 			cookie.m_expires = ParseDateAttribute(expires);
-		} else
-		{
-			cookie.m_isSessional = true;
+			cookie.m_persistent = true;
 		}
 
 		/* remove prefix dot from domain cause unnessasary*/
 		if (cookie.m_domain.front() == '.') cookie.m_domain.erase(cookie.m_domain.cbegin());
+
+		if (cookieHasHostPrefix && !(cookie.m_path == "/" && cookie.m_domain.empty() &&
+				cookie.m_secure))
+		{
+			throw cookie_policy_error("`__Host' prefix policy error!");
+		} else if (cookieHasSecurePrefix && !(cookie.m_secure))
+		{
+			throw cookie_policy_error("`__Secure' prefix policy error!");
+		}
+
 		return cookie;
 	};
 
@@ -892,22 +914,14 @@ public:
 
 	bool IsSessional() const noexcept
 	{
-		return m_isSessional;
+		return !m_persistent;
 	}
-
-
-
-	bool IsHosted() const noexcept
-	{
-		return m_isHosted;
-	}
-
 
 
 	/* If omitted, this attribute defaults to the host of the current document URL, not including subdomains. */
 	bool IsOnlyCurrectDomain() const noexcept
 	{
-		return m_domain.empty();
+		return m_hostOnly;
 	}
 
 
@@ -1064,7 +1078,7 @@ CreateQuery(const char* format, ...)
 	va_start(args, format);
 	va_copy(args2, args);
 	const std::size_t rqLen = vsnprintf(nullptr, 0, format, args2);
-	rq.reserve(rqLen + 1);
+	rq.resize(rqLen + 1);
 	vsnprintf(rq.data(), rqLen + 1, format, args);
 	return rq;
 };
@@ -1080,16 +1094,14 @@ __attribute__((nonnull(1)));
 int
 StorageCookie(sqlite3* dbConn, Cookie&& cookie)
 {
-	constexpr int STORAGE_FAILED_CODE = -1;
-
-	std::string strSameCookieCondition = CreateQuery(" WHERE name=%s, path=%s, domain=%s", 
+	std::string strSameCookieCondition = CreateQuery(" WHERE name='%s' AND path='%s' AND domain='%s';", 
 		cookie.m_name.c_str(), cookie.m_path.c_str(), cookie.m_domain.c_str());
 	std::string findExistCookieRq = std::string("SELECT creation_time FROM cookies") + strSameCookieCondition;
 
 	// callbackValue, number of columns, values of columns, names of columns
 	auto callback_1 = [](void* callbackValue, int columnsNum, char** values, char** columnsNames){
 		*reinterpret_cast<std::pair<int, std::string>*>(callbackValue) = std::make_pair(1, std::string(values[0]));
-		return 1;
+		return 0;
 	};
 
 	std::pair<int, std::string> pSameCookieExistFlag_ItsCreationTime;
@@ -1106,20 +1118,32 @@ StorageCookie(sqlite3* dbConn, Cookie&& cookie)
 	if (pSameCookieExistFlag_ItsCreationTime.first)
 	{
 		std::string deleteOldCookieRq = std::string("DELETE FROM cookies") + strSameCookieCondition;
-		sqlite3_exec(dbConn, deleteOldCookieRq.c_str(), nullptr, nullptr, nullptr);
+		if (int queryExecCode = sqlite3_exec(dbConn, deleteOldCookieRq.c_str(), nullptr, nullptr, nullptr);
+				queryExecCode != SQLITE_OK)
+		{
+			return queryExecCode;
+		}
 		
-		createdCookieTimeStr = cookie.GetStrCreatedTime();
+		createdCookieTimeStr = std::move(pSameCookieExistFlag_ItsCreationTime.second);
 	} else
 	{
-		/*createdCookieTimeStr = ;*/
+		createdCookieTimeStr = Cookie::format(cookie.m_creationTime);
 	}
 
 	// TODO: Canonicalized Host Names!
 	std::string insertCookieRq = CreateQuery("INSERT INTO cookies VALUES ("
-		"%s, %s, %s, %s, %s, %s, %d, %d, %d, %d);", cookie.m_name.c_str(), cookie.m_value.c_str(), cookie.m_domain.c_str(),
-			cookie.m_path.c_str(), createdCookieTimeStr.c_str(), createdCookieTimeStr.c_str(), 
-			cookie.m_domain.empty(), cookie.m_secure, 
-			cookie.m_httpOnly, static_cast<int>(cookie.m_isSessional));
+		"'%s', '%s', "
+		"'%s', '%s', "
+		"'%s', '%s', "
+		"'%s', '%s', "
+		"'%s', "
+		"%d, %d, %d, %d);", cookie.m_name.c_str(), cookie.m_value.c_str(), 
+			cookie.m_domain.c_str(), cookie.m_path.c_str(), 
+			Cookie::format(cookie.m_expires).c_str(), createdCookieTimeStr.c_str(), 
+			Cookie::format(std::chrono::system_clock::now()).c_str(), cookie.m_sameSite.c_str(),
+			cookie.m_cookieLocation.c_str(),
+			static_cast<int>(cookie.m_hostOnly), static_cast<int>(cookie.m_secure),
+			static_cast<int>(cookie.m_httpOnly), static_cast<int>(cookie.m_persistent));
 
 	if (int queryExecCode = sqlite3_exec(dbConn, insertCookieRq.c_str(), nullptr, nullptr, nullptr);
 			queryExecCode != SQLITE_OK)
@@ -1209,7 +1233,7 @@ std::string operator+(const std::string& str, url::pct_string_view&& pctStringVi
 
 std::string to_string(const url::pct_string_view& pctStringView)
 {
-	std::string retStr; retStr.reserve(pctStringView.length());
+	std::string retStr; retStr.resize(pctStringView.length());
 	std::transform(pctStringView.cbegin(), pctStringView.cend(),
 		std::back_inserter((retStr)), [](const typename url::pct_string_view::value_type& value) { return value; } );
 
@@ -1236,19 +1260,20 @@ int PrettyPrintCookies(void*, int, char** values, char** columnsNames)
 		std::cout << "Sessional";
 	}
 
-	std::cout << "; creation-time=" << values[5];
-	std::cout << "; last-access-time" << values[6];
+	std::cout << "; creation_time=" << values[5];
+	std::cout << "; last_access_time" << values[6];
 
-	if (std::atoi(values[7]))
+	if (std::atoi(values[8]))
 	{
 		std::cout << "; Secure";
 	}
 
-	if (std::atoi(values[8]))
+	if (std::atoi(values[9]))
 	{
-		std::cout << "; HttpOnly\n";
+		std::cout << "; HttpOnly";
 	}
 
+	std::cout << '\n';
 	return 0;
 };
 
@@ -1288,7 +1313,7 @@ httplib::Result InvokeHTTPMethod(const std::string& method,
 		{
 			res = client.Get(path, headers, 
 				// reject main document downloading!
-				[](const char*, std::size_t ) { return true; });
+				[]([[maybe_unused]] const char* responseBody, [[maybe_unused]] std::size_t resBodySize) { return true; });
 			break;
 		}
 		case HEAD_hv :
@@ -1456,7 +1481,7 @@ int main(int argc, char const *argv[])
 
 	struct DBConnCloser
 	{
-		void operator()(sqlite3* sqliteConn) const
+		void operator()(sqlite3* sqliteConn) const noexcept
 		{
 			/* 	If sqlite3_close_v2() is called with unfinalized prepared statements, 
 				unclosed BLOB handlers, and/or unfinished sqlite3_backups, 
@@ -1465,23 +1490,20 @@ int main(int argc, char const *argv[])
 				makes arrangements to automatically deallocate the database connection after all prepared statements 
 				are finalized, all BLOB handles are closed, and all backups have finished. 
 			*/
-			if (sqlite3_close(sqliteConn) != SQLITE_OK);
+			if (int closeConnExecCode = sqlite3_close(sqliteConn); closeConnExecCode != SQLITE_OK)
 			{
-				std::cerr << "Cannot close sqlite3 connection!\n";
+				std::cerr << "Cannot close sqlite3 connection: " << sqlite3_errstr(closeConnExecCode) << std::endl;
 			}
 		}
 	};
 
-	
-	sqlite3* cookieStoragePtr = nullptr;
-	auto openDBConnFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX;
-	// check file is exists
+	int openDBConnFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX;
 
 	struct stat unused_1;
 	if (stat(sqliteDBFilepath.c_str(), &unused_1) == -1)
 	{
 		// no such file or directory or system error
-		if (errno != EINVAL)
+		if (errno != ENOENT )
 		{
 			std::cerr << "stat() failed: " << strerror(errno) << std::endl;
 			return EXIT_FAILURE;
@@ -1490,8 +1512,9 @@ int main(int argc, char const *argv[])
 		openDBConnFlags |= SQLITE_OPEN_CREATE;
 	}
 
+	sqlite3* cookieStoragePtr = nullptr;
 	if (sqlite3_open_v2(sqliteDBFilepath.c_str(), &cookieStoragePtr, 
-		openDBConnFlags, nullptr) != SQLITE_OK)
+			openDBConnFlags, nullptr) != SQLITE_OK)
 	{
 		std::cerr << "Cannot open sqlite3 connection!\n";
 		return EXIT_FAILURE;
@@ -1522,7 +1545,7 @@ int main(int argc, char const *argv[])
 	{
 		if (CreateTable_cookies(cookiesStorage.get()) != SQLITE_OK)
 		{
-			std::cerr << "Cannot create table 'cookies': " << "<none>" << std::endl;
+			std::cerr << "Cannot create table `cookies': " << sqlite3_errmsg(cookiesStorage.get()) << std::endl;
 			return EXIT_FAILURE;
 		}
 	}
@@ -1554,7 +1577,7 @@ int main(int argc, char const *argv[])
 		simpleClient.set_ca_cert_path(strCaCertFilepath);
 	}
 
-	auto FindHeaderOrInsert = [&defaultRequestHeaders](std::string key, std::string value){
+	auto TryAddHeader = [&defaultRequestHeaders](std::string key, std::string value){
 		if (defaultRequestHeaders.find(key) == defaultRequestHeaders.cend())
 		{
 			defaultRequestHeaders.emplace(std::move(key), std::move(value));
@@ -1566,10 +1589,9 @@ int main(int argc, char const *argv[])
 	// -H 'Sec-Fetch-Mode: navigate' 
 	// -H 'Sec-Fetch-Site: cross-site' 
 	// -H 'Priority: u=0, i'
-	FindHeaderOrInsert("Host", to_string(boostUrlView.host()));
-	FindHeaderOrInsert("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-	FindHeaderOrInsert("Accept-Language", "en-US;q=1");
-	FindHeaderOrInsert("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0");
+	TryAddHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+	TryAddHeader("Accept-Language", "en-US;q=1");
+	TryAddHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0");
 
 	auto OverwriteHeader = [&defaultRequestHeaders](std::string key, std::string value){
 		if (httplib::Headers::const_iterator iter = defaultRequestHeaders.find(key);
@@ -1605,11 +1627,13 @@ int main(int argc, char const *argv[])
 			// check process path
 			Cookie::CheckCookiePolicy(cookie, boostUrlView);
 
-			// decode ptc_string_view (a reference precent-encoded strings)
-			url::decode_view urlTarget = *boostUrlView.encoded_target();
-			cookie.m_setCookieOrigin.assign(urlTarget.begin(), urlTarget.end());
+			boost::string_view cookieLocation = boostUrlView.buffer();
+			cookie.m_cookieLocation.assign(cookieLocation.begin(), cookieLocation.end());
 			// vecFt.emplace_back(std::async(std::launch::async, StorageCookie, cookiesStorage.get(), std::move(cookie)));
-			StorageCookie(cookiesStorage.get(), std::move(cookie));
+			if (StorageCookie(cookiesStorage.get(), std::move(cookie)) != SQLITE_OK)
+			{
+				std::cerr << "Failed storage cookie: " << sqlite3_errmsg(cookiesStorage.get()) << std::endl;
+			}
 		} catch(const Cookie::cookie_policy_error& cookiePolicyError)
 		{
 			std::cerr << "Warning: Cookie (" << setCookieHeader.second << ") from "  << requestUrl << 
@@ -1721,11 +1745,12 @@ int main(int argc, char const *argv[])
 	// 	}
 	// }
 
-	if (sqlite3_exec(cookiesStorage.get(), "SELECT * FROM cookies", &PrettyPrintCookies, nullptr, nullptr) != SQLITE_OK)
-	{
-		std::cerr << "Request failed!\n";
-		return EXIT_FAILURE;
-	}
+
+	// if (sqlite3_exec(cookiesStorage.get(), "SELECT * FROM cookies", &PrettyPrintCookies, nullptr, nullptr) != SQLITE_OK)
+	// {
+	// 	std::cerr << "Request failed!\n";
+	// 	return EXIT_FAILURE;
+	// }
 
 	return EXIT_SUCCESS;
 }
@@ -1740,7 +1765,7 @@ void CookerLogger(const httplib::Request& req, const httplib::Response& res,
 	{
 		for (const auto& [key, value] : req.headers)
 		{
-			std::cout << "> " << key << ' ' << value << '\n';
+			std::cout << "> " << key << ": " << value << '\n';
 		}			
 	}
 	std::cout << ">\n";
@@ -1750,7 +1775,7 @@ void CookerLogger(const httplib::Request& req, const httplib::Response& res,
 	{
 		for (const auto& [key, value] : res.headers)
 		{
-			std::cout << "< " << key << ' ' << value << '\n';
+			std::cout << "< " << key << ": " << value << '\n';
 		}			
 	}
 	std::cout << "<\n";
@@ -1769,6 +1794,8 @@ auto CreateTable_cookies(sqlite3* dbConn)
 		"expires VARCHAR(63) NOT NULL,"
 		"creation_time VARCHAR(63) NOT NULL,"
 		"last_access_time VARCHAR(63) NOT NULL,"
+		"sameSize VARCHAR(15) NOT NULL,"
+		"cookie_location VARCHAR(255) NOT NULL,"
 		"host INT NOT NULL,"
 		"secure INT NOT NULL,"
 		"httpOnly INT NOT NULL,"
