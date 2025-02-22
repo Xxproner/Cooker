@@ -1,1 +1,3 @@
 build/*
+test.cpp
+rqs.sqlite3
