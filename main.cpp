@@ -543,13 +543,24 @@ public:
 
 		if (cookie.m_partitioned && !cookie.m_secure)
 		{
-			if (!cookie.m_secure)
-			{
-				throw Cookie::cookie_policy_error("Partitioned attribute "
+			throw Cookie::cookie_policy_error("Partitioned attribute "
 					"must be set with `Secure'");
-			}
 		}
-	}
+
+
+		const bool isSameSiteAttrNone = !strcasecmp(sameSite.c_str(), "none");
+		if (!isSameSiteAttrNone && strcasecmp(sameSite.c_str(), "strict") &&
+				strcasecmp(sameSite.c_str(), "lax"))
+		{
+			throw cookie_policy_error("SameSite attribute possible values are: strict, lax, none!");
+		}
+
+
+		if (isSameSiteAttrNone && !cookie.m_secure)
+		{
+			throw cookie_policy_error("SameSite=None attribute but is missing the `secure' attribute!");
+		}
+	};
 
 
 
@@ -894,6 +905,8 @@ public:
 			cookie.m_persistent = true;
 		}
 
+		cookie.m_sameSite = std::move(sameSite);
+
 		/* remove prefix dot from domain cause unnessasary*/
 		if (cookie.m_domain.front() == '.') cookie.m_domain.erase(cookie.m_domain.cbegin());
 
@@ -956,85 +969,6 @@ public:
 };
 
 std::string Cookie::defaultSameSiteValue = "None";
-
-
-
-/* vector by domain, multimap by path */
-// struct CookiePathComparer
-// {
-// 	/*constexpr*/ bool 
-// 	operator()(const Cookie& lhs, const Cookie& rhs) const noexcept
-// 	{
-// 		return lhs.m_path < rhs.m_path;
-// 	};
-
-
-// 	using is_transparent = std::string;
-// 	bool
-// 	operator()(const Cookie& lhs, const is_transparent& rhs) const noexcept
-// 	{
-// 		return lhs.m_path < rhs;
-// 	};
-
-
-
-// 	bool
-// 	operator()(const is_transparent& lhs, const Cookie& rhs) const noexcept
-// 	{
-// 		return lhs < rhs.m_path;
-// 	};
-// };
-
-
-// template <typename T>
-// struct nullable 
-// {
-// private:
-// 	T* m_ptr;
-// public:
-// 	struct null_error : std::runtime_error
-// 	{
-// 		null_error(const char* msg = "null")
-// 			: std::runtime_error(msg)
-// 		{
-
-// 		};
-// 	};
-
-// 	nullable(T* ptr)
-// 		: m_ptr(ptr)
-// 	{
-// 	};
-
-
-
-// 	// possible to inline operator= ?
-// 	T* operator=(T* ptr) const noexcept
-// 	{
-// 		m_ptr = ptr;
-// 	};
-
-
-
-// 	T* operator*() const noexcept(false)
-// 	{
-// 		return m_ptr ?: throw null_error();
-// 	};
-
-
-
-// 	T* operator->() const noexcept(false)
-// 	{
-// 		return m_ptr ?: throw null_error();
-// 	};
-
-
-
-// 	explicit operator T*() const
-// 	{
-// 		return m_ptr ?: throw null_error();
-// 	}
-// };
 
 
 
@@ -1502,6 +1436,7 @@ int main(int argc, char const *argv[])
 	// -H 'Sec-Fetch-Mode: navigate' 
 	// -H 'Sec-Fetch-Site: cross-site' 
 	// -H 'Priority: u=0, i'
+	// -H 'Accept-Encoding: gzip, deflate, br, zstd'
 	TryAddHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
 	TryAddHeader("Accept-Language", "en-US;q=1");
 	TryAddHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0");
