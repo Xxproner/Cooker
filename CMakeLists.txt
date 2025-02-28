@@ -2,11 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(urlTree)
 
-add_compile_options(-g)
-add_compile_options(-Wall -Wextra -Werror=return-type)
-
 set(CMAKE_CXX_STANDARD 17 REQUIRED)
-set(CMAKE_VERBOSE_MAKEFILE off)
 
 # boost
 find_package(Boost 1.8.3 COMPONENTS url system container REQUIRED)
