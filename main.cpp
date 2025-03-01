@@ -40,9 +40,8 @@ auto to_underlying(Enum e)
 		typename std::underlying_type<Enum>::type>(e);
 }
 
-
-#define CPPHTTPLIB_OPENSSL_SUPPORT
-#define CPPHTTPLIB_ZLIB_SUPPORT
+// CPPHTTPLIB_OPENSSL_SUPPORT
+// CPPHTTPLIB_ZLIB_SUPPORT
 #include "httplib.h"
 
 
@@ -548,9 +547,10 @@ public:
 		}
 
 
-		const bool isSameSiteAttrNone = !strcasecmp(sameSite.c_str(), "none");
-		if (!isSameSiteAttrNone && strcasecmp(sameSite.c_str(), "strict") &&
-				strcasecmp(sameSite.c_str(), "lax"))
+		const char* sameSiteC_str = cookie.m_sameSite.c_str();
+		const bool isSameSiteAttrNone = !strcasecmp(sameSiteC_str, "none");
+		if (!isSameSiteAttrNone && strcasecmp(sameSiteC_str, "strict") &&
+				strcasecmp(sameSiteC_str, "lax"))
 		{
 			throw cookie_policy_error("SameSite attribute possible values are: strict, lax, none!");
 		}
@@ -742,6 +742,17 @@ public:
 
 
 
+	struct parsing_error : std::runtime_error
+	{
+		parsing_error(std::string msg)
+			: runtime_error(std::move(msg))
+		{
+			// nothing
+		}
+	};
+
+
+
 	/**
 	 * considered param is a VALID `Set-Cookie' header value! 
 	 * NO CHECKING SEMANTIC PARSED COOKIE correctness 
@@ -752,8 +763,6 @@ public:
 		// Set-Cookie: <cookie-name>=<cookie-value>; Domain=<domain-value>; Secure; HttpOnly
 		// non-terminal symbols : Domain; Secure; HttpOnly, Path, SameSize, 
 		// Max-Age, Expires, Partitioned
-
-		Cookie cookie = Cookie::CreateDefaultCookie();
 
 		/* parsing */
 		/* parse <cookie-name>=<cookie-value> */
@@ -787,6 +796,7 @@ public:
 			cookieNamePos += std::strlen(securePrefix);
 		}
 
+		Cookie cookie = Cookie::CreateDefaultCookie();
 		cookie.m_name = cookieNameAndValue.substr(cookieNamePos, cookieNameValueDelimPos - cookieNamePos);
 		cookie.m_value = cookieNameAndValue.substr(cookieNameValueDelimPos + 1);
 		/* end parsing <cookie-name>=<cookie-value> */
@@ -850,17 +860,16 @@ public:
 			{
 				token->second.assign(setCookieHeaderToken.substr(
 					std::strlen(token->first) + 1));
+			} else if (auto token = FindInContainer(setCookieHeaderToken, optionedCookieNonTerminals,
+					cookieTokenComparer); token != std::cend(optionedCookieNonTerminals))
+			{	
+				token->second = true;
 			} else 
 			{
-				auto token = FindInContainer(setCookieHeaderToken, optionedCookieNonTerminals,
-					cookieTokenComparer);
-				if (token != std::cend(optionedCookieNonTerminals))
-				{
-					token->second = true;
-				}
+				// thread-safe warn output
+				// throw parsing_error("Unknown attribute: " + setCookieHeaderToken);
 			}
 			
-			/* if token unspecified just skip it! */
 			oldDelimPos = delimPos + 1;
 			delimPos = setCookieHeaderValue.find(delim, oldDelimPos);
 		}
@@ -893,7 +902,7 @@ public:
 			if (errno == ERANGE || lastProcessedPos != (maxAge.c_str() + maxAge.length()))
 			{
 				errno = 0;
-				throw cookie_policy_error("Parsing `Max-Age' attribute error!");
+				throw parsing_error("Parsing `Max-Age' attribute error!");
 			}
 
 			cookie.m_expires = std::chrono::system_clock::now() + 
@@ -910,6 +919,7 @@ public:
 		/* remove prefix dot from domain cause unnessasary*/
 		if (cookie.m_domain.front() == '.') cookie.m_domain.erase(cookie.m_domain.cbegin());
 
+		// TODO: mv checks to CheckCookiePolicy()
 		if (cookieHasHostPrefix && !(cookie.m_path == "/" && cookie.m_domain.empty() &&
 				cookie.m_secure))
 		{
@@ -921,28 +931,6 @@ public:
 
 		return cookie;
 	};
-
-
-
-	bool IsObseleted() const noexcept
-	{
-		/* zero or negative specifies an immediate expiring */
-		return m_expires <= std::chrono::system_clock::now();
-	}
-
-
-
-	bool IsSessional() const noexcept
-	{
-		return !m_persistent;
-	}
-
-
-	/* If omitted, this attribute defaults to the host of the current document URL, not including subdomains. */
-	bool IsOnlyCurrectDomain() const noexcept
-	{
-		return m_hostOnly;
-	}
 
 
 
@@ -996,9 +984,9 @@ __attribute__((nonnull(1)));
 int
 StorageCookie(sqlite3* dbConn, Cookie&& cookie)
 {
-	std::string strSameCookieCondition = CreateQuery(" WHERE name='%s' AND path='%s' AND domain='%s';", 
+	std::string sameCookieCondition = CreateQuery(" WHERE name='%s' AND path='%s' AND domain='%s';", 
 		cookie.m_name.c_str(), cookie.m_path.c_str(), cookie.m_domain.c_str());
-	std::string findExistCookieRq = std::string("SELECT creation_time FROM cookies") + strSameCookieCondition;
+	std::string findExistCookieRq = std::string("SELECT creation_time FROM cookies") + sameCookieCondition;
 
 	// callbackValue, number of columns, values of columns, names of columns
 	auto callback_1 = [](void* callbackValue, int columnsNum, char** values, char** columnsNames){
@@ -1019,7 +1007,7 @@ StorageCookie(sqlite3* dbConn, Cookie&& cookie)
 	std::string createdCookieTimeStr;
 	if (pSameCookieExistFlag_ItsCreationTime.first)
 	{
-		std::string deleteOldCookieRq = std::string("DELETE FROM cookies") + strSameCookieCondition;
+		std::string deleteOldCookieRq = std::string("DELETE FROM cookies") + sameCookieCondition;
 		if (int queryExecCode = sqlite3_exec(dbConn, deleteOldCookieRq.c_str(), nullptr, nullptr, nullptr);
 				queryExecCode != SQLITE_OK)
 		{
@@ -1204,7 +1192,7 @@ void TransformRedirectedMethod(std::string& method, int statusCode,
 	if (cooker_HTTP_ns::IsHttpStatusCodeInList(statusCode,
 			{ http::MovedPermanently_301, http::Found_302, http::SeeOther_303}) && method != cooker_HTTP_ns::GET)
 	{
-		if (method != "GET" || method != "HEAD" || method != "OPTIONS") // request methods without body
+		if (method != "HEAD" || method != "OPTIONS") // request methods without body
 		{
 			headers.erase("Content-Type");
 			headers.erase("Content-Length");
@@ -1281,10 +1269,12 @@ int main(int argc, char const *argv[])
 			["--verbose"]["-v"]
 			("Verbose mode")
 				.optional()
+#if defined CPPHTTPLIB_OPENSSL_SUPPORT
 		| lyra::opt(strCaCertFilepath, "certificate path")
 			["--ssl_cert"]["-s"]
 			("Certificate path")
 				.optional()
+#endif // CPPHTTPLIB_OPENSSL_SUPPORT
 		| lyra::opt(numMaxRedirection, "number")
 			["--max_redir"]["-M"]
 			("Number max redirection")
@@ -1413,6 +1403,7 @@ int main(int argc, char const *argv[])
 
 	simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
 
+#if defined CPPHTTPLIB_OPENSSL_SUPPORT
 	if (simpleClient.is_ssl())
 	{
 		if (strCaCertFilepath.empty())
@@ -1423,7 +1414,7 @@ int main(int argc, char const *argv[])
 		
 		simpleClient.set_ca_cert_path(strCaCertFilepath);
 	}
-
+#endif // CPPHTTPLIB_OPENSSL_SUPPORT
 	auto TryAddHeader = [&defaultRequestHeaders](std::string key, std::string value){
 		if (defaultRequestHeaders.find(key) == defaultRequestHeaders.cend())
 		{
@@ -1450,7 +1441,9 @@ int main(int argc, char const *argv[])
 		}
 	};
 
+#if defined CPPHTTPLIB_ZLIB_SUPPORT
 	simpleClient.set_compress(true);
+#endif // CPPHTTPLIB_ZLIB_SUPPORT
 	OverwriteHeader("Accept-Encoding", "gzip");
 
 	if (preloadCookies)
@@ -1523,6 +1516,7 @@ int main(int argc, char const *argv[])
 				simpleClient.operator=(httplib::Client(urlOrigin));
 				std::string sch = boostLocationUrlView.scheme();
 				simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
+#if defined CPPHTTPLIB_OPENSSL_SUPPORT
 				if (simpleClient.is_ssl())
 				{
 					if (strCaCertFilepath.empty())
@@ -1533,6 +1527,7 @@ int main(int argc, char const *argv[])
 
 					simpleClient.set_ca_cert_path(strCaCertFilepath);
 				}
+#endif // CPPHTTPLIB_OPENSSL_SUPPORT
 
 				urlPath = boostLocationUrlView.encoded_resource();
 				url = locationUrl;
@@ -1628,29 +1623,28 @@ auto CreateTable_cookies(sqlite3* dbConn)
 
 
 
-int RemoveObseleteCookies(sqlite3* dbConn, const std::string& domain)
+int RemoveObseleteCookies(sqlite3* dbConn, [[maybe_unused]] const std::string& domain)
 {
+	/* @a domain for remove specified domain cookies */
 	bool hasObselete = false;
 	// TODO: comparing date by no place
 	std::string deleteCookiesRq = "DELETE FROM cookies WHERE ROWID IN (";
-	std::pair<bool&, std::string&> param(hasObselete, deleteCookiesRq);
 	if (sqlite3_exec(dbConn, "SELECT ROWID, expires FROM cookies", +[](void* rawArg, int, char** values, char** columnsNames){
-			auto arg = reinterpret_cast<decltype(param)*>(rawArg);
+			std::string& arg = *reinterpret_cast<std::string*>(rawArg);
 			if (Cookie::unformat(values[1]) < std::chrono::system_clock::now())
 			{
-				arg->first = true;
-				arg->second.append(values[1]).push_back(',');
+				arg.append(values[1]).push_back(',');
 			}
 
 			return 0;
-		}, reinterpret_cast<void*>(&param), nullptr) != SQLITE_OK)
+		}, reinterpret_cast<void*>(&deleteCookiesRq), nullptr) != SQLITE_OK)
 	{
 		return -1;
 	}
 
-	if (hasObselete)
+	if (deleteCookiesRq.back() != '(')
 	{
-		deleteCookiesRq.pop_back();
+		deleteCookiesRq.pop_back(); // remove tail `,'
 		deleteCookiesRq.append(");");
 
 		return sqlite3_exec(dbConn, deleteCookiesRq.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK 
@@ -1674,10 +1668,12 @@ httplib::Headers::iterator SetCookieHeader(sqlite3* dbConn, const std::string& r
 		"FROM cookies "
 		"WHERE (domain='%s' AND host=1 OR domain LIKE '%%%s' AND host=0) AND path LIKE '%s%%'",
 		ptrRequestUrlHost, ptrSecondLevelDomain, reqPath.c_str());
+
 	if (scheme == "https")
 	{
 		cookiesNameAndValueByDomainAndPathRq += " AND secure=1";
 	}
+
 
 	cookiesNameAndValueByDomainAndPathRq.push_back(';');
 

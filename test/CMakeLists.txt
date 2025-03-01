@@ -1,0 +1,1 @@
+add_executable(test ${CMAKE_SOURCE_DIR}/test.cpp)
