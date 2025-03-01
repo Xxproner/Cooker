@@ -16,15 +16,21 @@ display all acceptable (not errors in parsing) in common *Set-Cookie* header for
 Full usage options showed below: 
 ```
 USAGE:
-  main [-?|-h|--help] [--follow-redirect|-l] [--verbose|-v] [--ssl_cert|-s <certificate path>] [--default-samesite|-s <default `SameSite' value>]
-    [--header|-H <<header key : header value>>] [-X <request method>] [--data-raw|-d <request body>] <url>
+  cooker [-?|-h|--help] [--follow-redirect|-L] --database <sqlite3 database> [--verbose|-v] [--ssl_cert|-s <certificate path>] [--max_redir|-M <number>] [--preload|-l] [--default-samesite|-s <default `SameSite' value>] [--header|-H <<header key : header value>>] [-X <request method>] [--data-raw|-d <request body>] <url>
+
+Display usage information.
 
 OPTIONS, ARGUMENTS:
   -?, -h, --help          Show this tip
-  --follow-redirect, -l   Automatic redirection to 3xx http status code location value
+  --follow-redirect, -L   Automatic redirection to 3xx http status code location value
+  --database <sqlite3 database>
+                          sqlite database file
   --verbose, -v           Verbose mode
   --ssl_cert, -s <certificate path>
                           Certificate path
+  --max_redir, -M <number>
+                          Number max redirection [default: 10]
+  --preload, -l           Preload cookies before request
   --default-samesite, -s <default `SameSite' value>
                           Default `SameSize' value of cookie. (developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie#samesitesamesite-value)
   --header, -H <<header key : header value>>
@@ -45,6 +51,6 @@ _**./3rdParty**_ directory includes two start dependencies.
 # Build
 ```
 mkdir build && cd build
-cmake ..
+cmake -DCMAKE_PREFIX_PATH=<path_to_boost> -DCMAKE_CXX_FLAGS=<...> -DSSL=<ON|OFF> -DZIB=<ON|OFF> -DWITH_TEST=<ON|OFF> ..
 make
 ```
