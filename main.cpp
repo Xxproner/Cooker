@@ -4,7 +4,6 @@
 #include <ctype.h> // tolower(), isdigit()
 #include <errno.h> // strerror(), errno
 #include <assert.h>
-#include <sys/stat.h>
 
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 
@@ -21,7 +20,6 @@
 #include <algorithm> // count(), copy_backward()
 #include <array>
 #include <type_traits> // to_underlaying(), underlaying_type
-#include <forward_list>
 #include <algorithm> // find_if_not()
 #include <initializer_list>
 #include <bitset>
@@ -31,6 +29,7 @@
 #include <functional> // bind()
 #include <memory>
 #include <future> // async()
+#include <filesystem>
 
 
 template <typename Enum>
@@ -63,28 +62,6 @@ using result = boost::system::result<T>;
 
 namespace cooker_url_utils_ns
 {
-	std::pair<std::string, std::string>
-	SplitUrlIntoOriginAndPath(const std::string& url, url::url_view& parsedUrl)
-	{
-		using pStr = std::pair<std::string, std::string>;
-		boost::system::result<url::url_view> parseUrlResult = url::parse_uri_reference(url);
-		if (!parseUrlResult)
-		{
-			throw std::runtime_error("Invalid url!");
-		}
-		parsedUrl = parseUrlResult.value();
-
-		// TODO: change it
-		if (parsedUrl.host_type() != url::host_type::name)
-		{
-			throw std::runtime_error("Invalid host type: must host_type::name!");
-		}
-
-		return pStr(parsedUrl.encoded_origin(), parsedUrl.path());
-	};
-
-
-
 	/* site is allowed set the domain or it's subdomains */
 	bool
 	IsSubdomain(const std::string& potentialSubdomain, 
@@ -231,7 +208,7 @@ namespace cooker_HTTP_ns
 	bool IsHttpStatusCodeInList(int statusCode, std::initializer_list<int> list){
 		return std::find(list.begin(), list.end(), statusCode) != list.begin();
 	};
-}; // HTTP_cooker
+}; // namespace HTTP_cooker
 
 
 namespace cooker_details
@@ -364,7 +341,7 @@ namespace cooker_details
 
 		return i;
 	};
-};
+}; // namespace cooker_details
 
 
 
@@ -402,7 +379,7 @@ public:
 
 
 
-	Cookie(Cookie&& cookie)
+	Cookie(Cookie&& cookie) // maybe default?
 		: m_name(std::move(cookie.m_name))
 		, m_value(std::move(cookie.m_value))
 		, m_sameSite(cookie.m_sameSite)
@@ -421,7 +398,7 @@ public:
 
 
 
-	Cookie& operator=(Cookie&& cookie)
+	Cookie& operator=(Cookie&& cookie) // weird!
 	{
 		assert(cookie.m_domain == m_domain && 
 			cookie.m_path == m_path &&
@@ -467,9 +444,9 @@ public:
 		cookie.m_persistent 			= false;
 		cookie.m_partitioned 			= false;
 		cookie.m_hostOnly 				= false;
-
 		cookie.m_creationTime 			= std::chrono::system_clock::now();
 	  	cookie.m_sameSite 				= GetDefaultSameSiteValue();
+
 		return cookie;
 	}
 
@@ -854,9 +831,8 @@ public:
 			std::string_view setCookieHeaderToken = 
 				std::string_view(setCookieHeaderValue.data() + oldDelimPos, delimPos - oldDelimPos);
 			setCookieHeaderToken = cooker_details::TrimPrefixWhitespace(setCookieHeaderToken);
-			auto token = FindInContainer(setCookieHeaderToken, valuedCookieNonTerminals, 
-				cookieTokenComparer);
-			if (token != std::cend(valuedCookieNonTerminals))
+			if (auto token = FindInContainer(setCookieHeaderToken, valuedCookieNonTerminals, 
+				cookieTokenComparer); token != std::cend(valuedCookieNonTerminals))
 			{
 				token->second.assign(setCookieHeaderToken.substr(
 					std::strlen(token->first) + 1));
@@ -866,7 +842,7 @@ public:
 				token->second = true;
 			} else 
 			{
-				// thread-safe warn output
+				// cout is thread-safe but result implementation defined
 				// throw parsing_error("Unknown attribute: " + setCookieHeaderToken);
 			}
 			
@@ -977,7 +953,7 @@ CreateQuery(const char* format, ...)
 
 int
 StorageCookie(sqlite3* dbConn, Cookie&& cookie)
-__attribute__((nonnull(1)));
+[[gnu::nonnull(1)]];
 
 
 
@@ -1209,26 +1185,29 @@ void CookerLogger(const httplib::Request& req, const httplib::Response& res,
 
 
 
-auto CreateTable_cookies(sqlite3* dbConn)
-	-> decltype(SQLITE_OK)
-__attribute__((nonnull(1)));
+bool TableExists(sqlite3* dbConn, std::string_view tableName)
+[[gnu::nonnull(1)]];
 
 
 
 int RemoveObseleteCookies(sqlite3* dbConn, [[maybe_unused]] const std::string& domain)
-__attribute__((nonnull(1)));
+[[gnu::nonnull(1)]];
 
 
 
 httplib::Headers::iterator SetCookieHeader(sqlite3* dbConn, const std::string& domain,
 	const std::string& path, const std::string& scheme, httplib::Headers& headers)
-__attribute__((nonnull(1)));
+[[gnu::nonnull(1)]];
 
 
 
 void ParseSetCookieHeadersAndStore(std::launch lauchPolicy, sqlite3* dbConn,
 	httplib::Headers& headers, const url::url_view& urlView)
-__attribute__((nonnull(2)));
+[[gnu::nonnull(2)]];
+
+
+
+[[gnu::always_inline]] inline std::string StringViewToString(std::string_view view);
 
 
 
@@ -1243,10 +1222,10 @@ int main(int argc, char const *argv[])
 		, sqliteDBFilepath;
 
 
-	int numMaxRedirection = 10; // by default
+	std::size_t numMaxRedirection = 10; // by default
 
 	bool isShowHelpTip = false
-		, followRedirect = false
+		// , followRedirect = false
 		, verboseMode = false
 		, preloadCookies = false;
 
@@ -1257,10 +1236,10 @@ int main(int argc, char const *argv[])
 	auto cliParser = lyra::cli()
 		| lyra::help(isShowHelpTip)
 			("Show this tip")
-		| lyra::opt(followRedirect)
-			["--follow-redirect"]["-L"]
-			("Automatic redirection to 3xx http status code location value")
-				.optional()
+		// | lyra::opt(followRedirect)
+		// 	["--follow-redirect"]["-L"]
+		// 	("Automatic redirection to 3xx http status code location value")
+		// 		.optional()
 		| lyra::opt(sqliteDBFilepath, "sqlite3 database")
 			["--database"]
 			("sqlite database file")
@@ -1341,16 +1320,8 @@ int main(int argc, char const *argv[])
 
 	int openDBConnFlags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX;
 
-	struct stat unused_1;
-	if (stat(sqliteDBFilepath.c_str(), &unused_1) == -1)
+	if (!std::filesystem::exists(sqliteDBFilepath)) // if not exists
 	{
-		// no such file or directory or system error
-		if (errno != ENOENT )
-		{
-			std::cerr << "stat() failed: " << strerror(errno) << std::endl;
-			return EXIT_FAILURE;
-		}
-
 		openDBConnFlags |= SQLITE_OPEN_CREATE;
 	}
 
@@ -1364,43 +1335,74 @@ int main(int argc, char const *argv[])
 
 	std::shared_ptr<sqlite3> cookiesStorage(std::exchange(cookiesStoragePtr, nullptr), DBConnCloser());
 
-	bool isTableExists = false;
-	if (not (openDBConnFlags & SQLITE_OPEN_CREATE))
+	if (not ((openDBConnFlags & SQLITE_OPEN_CREATE) || TableExists(cookiesStorage.get(), "cookies")))
 	{
-		const char* checkTableExistRq = "SELECT name FROM sqlite_master WHERE type='table' AND name='cookies'";
-		if (int execCodeRq = sqlite3_exec(cookiesStorage.get(), checkTableExistRq, +[](void* flagPtr, int, char** values, char**){
-				if (values[0][0] != '\0')
-				{
-					*reinterpret_cast<bool*>(flagPtr) = true;
-				}
-				return 0;
-			}, reinterpret_cast<void*>(&isTableExists), nullptr); execCodeRq != SQLITE_OK)
-		{
-			fprintf(stderr, "Request (%s: %s) failed %s\n", __FILENAME__, __LINE__, sqlite3_errstr(execCodeRq));
-			return EXIT_FAILURE;
-		}
-	}
+		constexpr const char* createCookiesTableRq = "CREATE TABLE cookies ("
+			"name VARCHAR(255) NOT NULL,"
+			"value VARCHAR(255) NOT NULL,"
+			"domain VARCHAR(127) NOT NULL,"
+			"path VARCHAR(127) NOT NULL,"
+			"expires VARCHAR(63) NOT NULL,"
+			"creation_time VARCHAR(63) NOT NULL,"
+			"last_access_time VARCHAR(63) NOT NULL,"
+			"sameSize VARCHAR(15) NOT NULL,"
+			"cookie_location VARCHAR(255) NOT NULL,"
+			"host INT NOT NULL,"
+			"secure INT NOT NULL,"
+			"httpOnly INT NOT NULL,"
+			"persistent INT NOT NULL);";
 
-
-	if (!isTableExists)
-	{
-		if (CreateTable_cookies(cookiesStorage.get()) != SQLITE_OK)
+		if (sqlite3_exec(cookiesStorage.get(), createCookiesTableRq, nullptr, nullptr, nullptr) != SQLITE_OK)
 		{
 			std::cerr << "Cannot create table `cookies': " << sqlite3_errmsg(cookiesStorage.get()) << std::endl;
 			return EXIT_FAILURE;
 		}
 	}
 
-	url::url_view boostUrlView;
-	auto [urlOrigin, urlPath] = cooker_url_utils_ns::SplitUrlIntoOriginAndPath(requestUrl, boostUrlView);
-
-	if (urlPath.empty())
+	// uri fragment not needed
+	boost::system::result<url::url_view> parseUrlResult = url::parse_absolute_uri(requestUrl);
+	if (!parseUrlResult)
 	{
-		urlPath = "/";
+		std::cerr << "Invalid url!\n";
+		return EXIT_FAILURE;
 	}
 
-	httplib::Client simpleClient(urlOrigin);
+	url::url_view urlView = parseUrlResult.value();
 
+	// TODO: what do with ipv4 and ipv6
+	// how storage cookie, what its value domain?
+	if (urlView.host_type() != url::host_type::name)
+	{
+		std::cerr << "Invalid host type: must host_type::name!" 
+			<< std::endl;
+		return EXIT_FAILURE;
+	}
+
+	std::string path = urlView.path()
+			, host = urlView.host_name()
+			, scheme;
+
+	if (path.empty())
+	{
+		path = "/";
+	}
+
+	if (urlView.scheme_id() == url::scheme::http ||
+			urlView.scheme_id() == url::scheme::https)
+	{
+		scheme = urlView.scheme();
+	} else if (urlView.scheme_id() == url::scheme::unknown)
+	{
+		scheme = "http";
+	} else
+	{
+		std::cerr << "Unavailable scheme: only http/https possible!\n";
+		return EXIT_FAILURE;
+	}
+
+	std::string origin = scheme + "://" + host;
+
+	httplib::Client simpleClient(origin);
 	simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
 
 #if defined CPPHTTPLIB_OPENSSL_SUPPORT
@@ -1415,10 +1417,12 @@ int main(int argc, char const *argv[])
 		simpleClient.set_ca_cert_path(strCaCertFilepath);
 	}
 #endif // CPPHTTPLIB_OPENSSL_SUPPORT
-	auto TryAddHeader = [&defaultRequestHeaders](std::string key, std::string value){
+
+	auto TryAddHeader = [&defaultRequestHeaders](std::string_view keyView, std::string_view valueView){
+		auto key = StringViewToString(keyView);
 		if (defaultRequestHeaders.find(key) == defaultRequestHeaders.cend())
 		{
-			defaultRequestHeaders.emplace(std::move(key), std::move(value));
+			defaultRequestHeaders.emplace(std::move(key), StringViewToString(valueView));
 		}
 	};
 
@@ -1427,35 +1431,34 @@ int main(int argc, char const *argv[])
 	// -H 'Sec-Fetch-Mode: navigate' 
 	// -H 'Sec-Fetch-Site: cross-site' 
 	// -H 'Priority: u=0, i'
-	// -H 'Accept-Encoding: gzip, deflate, br, zstd'
 	TryAddHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
 	TryAddHeader("Accept-Language", "en-US;q=1");
 	TryAddHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0");
 
-	auto OverwriteHeader = [&defaultRequestHeaders](std::string key, std::string value){
+	auto OverwriteHeader = [&defaultRequestHeaders](std::string_view keyView, std::string_view valueView){
+		auto key = StringViewToString(keyView);
 		if (httplib::Headers::const_iterator iter = defaultRequestHeaders.find(key);
 				iter != defaultRequestHeaders.cend())
 		{
 			defaultRequestHeaders.erase(iter);
-			defaultRequestHeaders.emplace(std::move(key), std::move(value));
+			defaultRequestHeaders.emplace(std::move(key), StringViewToString(valueView));
 		}
 	};
 
 #if defined CPPHTTPLIB_ZLIB_SUPPORT
 	simpleClient.set_compress(true);
-#endif // CPPHTTPLIB_ZLIB_SUPPORT
 	OverwriteHeader("Accept-Encoding", "gzip");
+#endif // CPPHTTPLIB_ZLIB_SUPPORT
 
 	if (preloadCookies)
 	{
-		std::string requestUrlHost = boostUrlView.host();
-		if (RemoveObseleteCookies(cookiesStorage.get(), requestUrlHost) != 0)
+		if (RemoveObseleteCookies(cookiesStorage.get(), host) != 0)
 		{
-			fprintf(stderr, "Remove obselete cookies failed: <unknown error>\n");
+			std::cerr << "Remove obselete cookies failed: <unknown error>\n";
 			return EXIT_FAILURE;
 		}
 
-		SetCookieHeader(cookiesStorage.get(), requestUrlHost, urlPath, boostUrlView.scheme(), 
+		SetCookieHeader(cookiesStorage.get(), host, path, scheme, 
 			defaultRequestHeaders);
 	}
 
@@ -1466,7 +1469,7 @@ int main(int argc, char const *argv[])
 	};
 
 	httplib::Result httpResult = InvokeHTTPMethod(method, simpleClient,
-		urlPath, defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
+		path, defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
 
 	if (!httpResult)
 	{
@@ -1476,98 +1479,119 @@ int main(int argc, char const *argv[])
 	}
 
 	ParseSetCookieHeadersAndStore(std::launch::async, cookiesStorage.get(), httpResult->headers,
-		boostUrlView);
+		urlView);
 
-	if (followRedirect)
-	{
-		while (in_range(httpResult->status, http::MultipleChoices_300, http:: MultipleChoices_300 + 99) &&
-			numMaxRedirection-- > 0)
-		{
-			TransformRedirectedMethod(method, httpResult->status, defaultRequestHeaders);
+// 	if (followRedirect)
+// 	{
+// 		while (in_range(httpResult->status, http::MultipleChoices_300, http:: MultipleChoices_300 + 99) &&
+// 			numMaxRedirection-- > 0)
+// 		{
+// 			TransformRedirectedMethod(method, httpResult->status, defaultRequestHeaders);
 
-			typename httplib::Headers::const_iterator 
-				locationHTTPHeader = httpResult->headers.find("Location");
+// 			typename httplib::Headers::const_iterator 
+// 				locationHttpHeader = httpResult->headers.find("Location");
 
-			if (locationHTTPHeader == httpResult->headers.cend())
-			{
-				std::cout << "Redirect HTTP status but not any `Location' header in response!\n";
-				break;
-			}
+// 			if (locationHttpHeader == httpResult->headers.cend())
+// 			{
+// 				std::cout << "Redirect HTTP status but not any `Location' header in response!\n";
+// 				break;
+// 			}
 
-			/* copy needed */std::string locationUrl = locationHTTPHeader->second;
-			std::string url;
+// 			const std::string& locationUrl = locationHttpHeader->second;
+// 			std::string url;
 
-			/* origin   = scheme://authority */
-			/* resource = /path?query#frag */
-			/* target   = /path?:query */
-			result<url::url_view> parsedLocationUrlResult = url::parse_uri_reference(locationUrl);
-			if (!parsedLocationUrlResult)
-			{
-				std::cout << "Invalid header `Location' value. It is rarely possible!\n";
-				return EXIT_FAILURE;
-			}
+// 			/* origin   = scheme://authority */
+// 			/* resource = /path?query#fragment */
+// 			/* target   = /path?:query */
+// 			result<url::url_view> parsedLocationUrlResult = url::parse_uri_reference(locationUrl);
+// 			if (!parsedLocationUrlResult)
+// 			{
+// 				std::cout << "Invalid header `Location' value. It is rarely possible!\n";
+// 				return EXIT_FAILURE;
+// 			}
 			
-			auto boostLocationUrlView = parsedLocationUrlResult.value();
+// 			urlView = parsedLocationUrlResult.value();
 
-			if (boostLocationUrlView.has_scheme()) // full url
-			{
-				urlOrigin = to_string(boostLocationUrlView.encoded_origin());
-				/* host changes, need to new client */
-				simpleClient.operator=(httplib::Client(urlOrigin));
-				std::string sch = boostLocationUrlView.scheme();
-				simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
-#if defined CPPHTTPLIB_OPENSSL_SUPPORT
-				if (simpleClient.is_ssl())
-				{
-					if (strCaCertFilepath.empty())
-					{
-						std::cerr << "Error: Certificate path must be specified!\n";
-						return EXIT_FAILURE;
-					}
+// 			if (urlView.has_scheme()) // full url
+// 			{
+// 				if (urlView.host_type() != url::host_type::name)
+// 				{
+// 					std::cerr << "Invalid host type of location url: must host_type::name!" 
+// 						<< std::endl;
+// 					return EXIT_FAILURE;
+// 				}
 
-					simpleClient.set_ca_cert_path(strCaCertFilepath);
-				}
-#endif // CPPHTTPLIB_OPENSSL_SUPPORT
+// 				path = urlView.path();
+// 				host = urlView.host_name();
 
-				urlPath = boostLocationUrlView.encoded_resource();
-				url = locationUrl;
-			} else if (boostLocationUrlView.is_path_absolute()) // absolute url
-			{
-				urlPath = locationUrl;
-				cooker_url_utils_ns::ReplaceUrlResource(url, locationUrl);
-			} else // relative path
-			{
-				urlPath = boostUrlView.path() + locationUrl;
-				cooker_url_utils_ns::RemoveQueryAndFrag(url); 
-				cooker_url_utils_ns::AppendPath(url, locationUrl);
-			}
+// 				if (path.empty())
+// 				{
+// 					path = "/";
+// 				}
+
+// 				if (urlView.scheme_id() == url::scheme::http ||
+// 						urlView.scheme_id() == url::scheme::https)
+// 				{
+// 					scheme = urlView.scheme();
+// 				} else if (urlView.scheme_id() == url::scheme::unknown)
+// 				{
+// 					scheme = "http";
+// 				} else
+// 				{
+// 					std::cerr << "Unavailable scheme: only http/https possible!\n";
+// 					return EXIT_FAILURE;
+// 				}
+
+// 				origin = scheme + "://" + host;
+
+// 				httplib::Client simpleClient(origin);
+// 				simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
+
+// #if defined CPPHTTPLIB_OPENSSL_SUPPORT
+// 				if (simpleClient.is_ssl())
+// 				{
+// 					if (strCaCertFilepath.empty())
+// 					{
+// 						std::cerr << "Error: Certificate path must be specified!\n";
+// 						return EXIT_FAILURE;
+// 					}
+					
+// 					simpleClient.set_ca_cert_path(strCaCertFilepath);
+// 				}
+// #endif // CPPHTTPLIB_OPENSSL_SUPPORT
+// #if defined CPPHTTPLIB_ZLIB_SUPPORT
+// 					simpleClient.set_compress(true);
+// #endif // CPPHTTPLIB_ZLIB_SUPPORT
+// 			} else if (urlView.is_path_absolute()) // absolute url
+// 			{
+// 				path = locationUrl;
+// 				cooker_url_utils_ns::ReplaceUrlResource(url, locationUrl);
+// 			} else // relative path
+// 			{
+// 				path = urlView.path() + locationUrl;
+// 				cooker_url_utils_ns::RemoveQueryAndFrag(url); 
+// 				cooker_url_utils_ns::AppendPath(url, locationUrl);
+// 			}
+
+// 			SetCookieHeader(cookiesStorage.get(), urlView.host(), path, 
+// 				urlView.scheme(), defaultRequestHeaders);
+
+// 			std::cout << "> Redirecting to " << url << "\n\n";
+
+// 			httpResult = InvokeHTTPMethod(method, simpleClient, path,
+// 				defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
+// 			if (!httpResult)
+// 			{
+// 				std::cerr << "> " << method << " " << url << " failed! " << 
+// 					httplib::to_string(httpResult.error()) << "\n\n";
+// 				return EXIT_FAILURE;
+// 			}
 
 
-
-			SetCookieHeader(cookiesStorage.get(), boostLocationUrlView.host_name(), urlPath, 
-				boostLocationUrlView.scheme(), defaultRequestHeaders);
-
-			std::cout << "> Redirecting to " << url << "\n\n";
-
-			httpResult = InvokeHTTPMethod(method, simpleClient, urlPath,
-				defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
-			if (!httpResult)
-			{
-				std::cerr << "> " << method << " " << url << " failed! " << 
-					httplib::to_string(httpResult.error()) << "\n\n";
-				return EXIT_FAILURE;
-			}
-
-
-			ParseSetCookieHeadersAndStore(std::launch::deferred, cookiesStorage.get(), 
-				httpResult->headers, boostLocationUrlView);
-		}
-	}
-
-	if (numMaxRedirection < 0)
-	{
-		std::cerr << "Warning: Limit max redirection error!\n";
-	}
+// 			ParseSetCookieHeadersAndStore(std::launch::deferred, cookiesStorage.get(), 
+// 				httpResult->headers, urlView);
+// 		}
+// 	}
 
 	return EXIT_SUCCESS;
 }
@@ -1597,29 +1621,6 @@ void CookerLogger(const httplib::Request& req, const httplib::Response& res,
 	}
 	std::cout << "<\n";
 };
-
-
-
-auto CreateTable_cookies(sqlite3* dbConn)
-	-> decltype(SQLITE_OK)
-{
-	const char* createTableRq = "CREATE TABLE cookies ("
-		"name VARCHAR(255) NOT NULL,"
-		"value VARCHAR(255) NOT NULL,"
-		"domain VARCHAR(127) NOT NULL,"
-		"path VARCHAR(127) NOT NULL,"
-		"expires VARCHAR(63) NOT NULL,"
-		"creation_time VARCHAR(63) NOT NULL,"
-		"last_access_time VARCHAR(63) NOT NULL,"
-		"sameSize VARCHAR(15) NOT NULL,"
-		"cookie_location VARCHAR(255) NOT NULL,"
-		"host INT NOT NULL,"
-		"secure INT NOT NULL,"
-		"httpOnly INT NOT NULL,"
-		"persistent INT NOT NULL);";
-
-	return sqlite3_exec(dbConn, createTableRq, nullptr, nullptr, nullptr);
-}
 
 
 
@@ -1769,3 +1770,89 @@ void ParseSetCookieHeadersAndStore(std::launch lauchPolicy, sqlite3* dbConn,
 		}
 	});
 }
+
+
+
+using namespace std::literals::chrono_literals;
+bool TableExists(sqlite3* dbConn, std::string_view tableName)
+{
+	constexpr const char* checkTableExistRq = 
+		"SELECT name FROM sqlite_master WHERE type='table' AND name=@tableName"; // tableName
+	bool isTableExists = false;
+	sqlite3_stmt* dbStmtRawPtr = nullptr;
+
+	if (sqlite3_prepare_v2(dbConn, checkTableExistRq, -1,
+			&dbStmtRawPtr, nullptr) != SQLITE_OK)
+	{
+		throw std::runtime_error(
+			std::string("sqlite API (sqlite3_prepare()) error: ") + sqlite3_errmsg(dbConn));
+	}
+
+	struct SqliteStmtFinalizer
+	{
+		void operator()(sqlite3_stmt* dbStmtRawPtr) const noexcept
+		{
+			sqlite3_finalize(dbStmtRawPtr);
+		};
+	};
+
+	std::unique_ptr<sqlite3_stmt, SqliteStmtFinalizer> dbStmt(
+		dbStmtRawPtr, SqliteStmtFinalizer());
+
+	if (sqlite3_bind_text(dbStmt.get(), 1, tableName.data(), tableName.length() * sizeof(std::string_view::value_type),
+			SQLITE_STATIC) != SQLITE_OK)
+	{
+		throw std::runtime_error(
+			std::string("sqlite API (sqlite3_bind_()) error: ") + sqlite3_errmsg(dbConn));
+	}
+
+	int stmtStepCode = SQLITE_OK;
+	while (stmtStepCode != SQLITE_DONE)
+	{
+		stmtStepCode = sqlite3_step(dbStmt.get());
+		switch(stmtStepCode)
+		{
+			case SQLITE_BUSY:
+				std::this_thread::sleep_for(100ms);
+				break;
+			case SQLITE_ROW:
+				isTableExists = true;
+				stmtStepCode = SQLITE_DONE;
+				break;
+			case SQLITE_DONE:
+				break;
+			default:
+				throw std::runtime_error(
+					std::string("sqlite API (sqlite3_step()) error: ") + sqlite3_errmsg(dbConn));
+		}		
+	}
+
+	return isTableExists;
+};
+
+
+
+#if defined TESTING
+void TableExists_test()
+{
+	sqlite3* dbConn;
+	
+	sqlite3_open_v2("./test_db", &dbConn, 
+			SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE, nullptr);
+
+	sqlite3_exec(dbConn, "CREATE TABLE t_one(t_name VARCHAR(2));", nullptr, nullptr, nullptr);
+	sqlite3_exec(dbConn, "CREATE TABLE t_two(t_name VARCHAR(2));", nullptr, nullptr, nullptr);
+	sqlite3_exec(dbConn, "CREATE TABLE t_three(t_name VARCHAR(2));", nullptr, nullptr, nullptr);
+
+	assert(TableExists("t_one") && "not passed 1");
+	assert(TableExists("t_two") && "not passed 2");
+	assert(TableExists("t_three") && "not passed 3");
+};
+#endif // TESTING
+
+
+
+std::string StringViewToString(std::string_view view)
+{
+	return std::string(view.data(), view.length());
+};
