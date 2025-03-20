@@ -1225,7 +1225,7 @@ int main(int argc, char const *argv[])
 	std::size_t numMaxRedirection = 10; // by default
 
 	bool isShowHelpTip = false
-		// , followRedirect = false
+		, followRedirect = false
 		, verboseMode = false
 		, preloadCookies = false;
 
@@ -1236,10 +1236,10 @@ int main(int argc, char const *argv[])
 	auto cliParser = lyra::cli()
 		| lyra::help(isShowHelpTip)
 			("Show this tip")
-		// | lyra::opt(followRedirect)
-		// 	["--follow-redirect"]["-L"]
-		// 	("Automatic redirection to 3xx http status code location value")
-		// 		.optional()
+		| lyra::opt(followRedirect)
+			["--follow-redirect"]["-L"]
+			("Automatic redirection to 3xx http status code location value")
+				.optional()
 		| lyra::opt(sqliteDBFilepath, "sqlite3 database")
 			["--database"]
 			("sqlite database file")
@@ -1481,117 +1481,113 @@ int main(int argc, char const *argv[])
 	ParseSetCookieHeadersAndStore(std::launch::async, cookiesStorage.get(), httpResult->headers,
 		urlView);
 
-// 	if (followRedirect)
-// 	{
-// 		while (in_range(httpResult->status, http::MultipleChoices_300, http:: MultipleChoices_300 + 99) &&
-// 			numMaxRedirection-- > 0)
-// 		{
-// 			TransformRedirectedMethod(method, httpResult->status, defaultRequestHeaders);
+	if (followRedirect)
+	{
+		while (in_range(httpResult->status, http::MultipleChoices_300, http:: MultipleChoices_300 + 99) &&
+			numMaxRedirection-- > 0)
+		{
+			TransformRedirectedMethod(method, httpResult->status, defaultRequestHeaders);
 
-// 			typename httplib::Headers::const_iterator 
-// 				locationHttpHeader = httpResult->headers.find("Location");
+			typename httplib::Headers::const_iterator 
+				locationHttpHeader = httpResult->headers.find("Location");
 
-// 			if (locationHttpHeader == httpResult->headers.cend())
-// 			{
-// 				std::cout << "Redirect HTTP status but not any `Location' header in response!\n";
-// 				break;
-// 			}
+			if (locationHttpHeader == httpResult->headers.cend())
+			{
+				std::cout << "Redirect HTTP status but not any `Location' header in response!\n";
+				break;
+			}
 
-// 			const std::string& locationUrl = locationHttpHeader->second;
-// 			std::string url;
+			std::string locationUrl = locationHttpHeader->second;
 
-// 			/* origin   = scheme://authority */
-// 			/* resource = /path?query#fragment */
-// 			/* target   = /path?:query */
-// 			result<url::url_view> parsedLocationUrlResult = url::parse_uri_reference(locationUrl);
-// 			if (!parsedLocationUrlResult)
-// 			{
-// 				std::cout << "Invalid header `Location' value. It is rarely possible!\n";
-// 				return EXIT_FAILURE;
-// 			}
+			/* origin   = scheme://authority */
+			/* resource = /path?query#fragment */
+			/* target   = /path?:query */
+			result<url::url_view> parsedLocationUrlResult = url::parse_uri_reference(locationUrl);
+			if (!parsedLocationUrlResult)
+			{
+				std::cout << "Invalid header `Location' value. It is rarely possible!\n";
+				return EXIT_FAILURE;
+			}
 			
-// 			urlView = parsedLocationUrlResult.value();
+			if (urlView.host_type() != url::host_type::name)
+			{
+				std::cout << "Invalid host type of location url: must host_type::name!" 
+					<< std::endl;
+				return EXIT_FAILURE;
+			}
 
-// 			if (urlView.has_scheme()) // full url
-// 			{
-// 				if (urlView.host_type() != url::host_type::name)
-// 				{
-// 					std::cerr << "Invalid host type of location url: must host_type::name!" 
-// 						<< std::endl;
-// 					return EXIT_FAILURE;
-// 				}
+			urlView = parsedLocationUrlResult.value();
 
-// 				path = urlView.path();
-// 				host = urlView.host_name();
+			if (urlView.has_scheme()) // full url
+			{
+				path = urlView.path();
+				host = urlView.host();
+				requestUrl = locationUrl;
 
-// 				if (path.empty())
-// 				{
-// 					path = "/";
-// 				}
+				if (path.empty())
+				{
+					path = "/";
+				}
 
-// 				if (urlView.scheme_id() == url::scheme::http ||
-// 						urlView.scheme_id() == url::scheme::https)
-// 				{
-// 					scheme = urlView.scheme();
-// 				} else if (urlView.scheme_id() == url::scheme::unknown)
-// 				{
-// 					scheme = "http";
-// 				} else
-// 				{
-// 					std::cerr << "Unavailable scheme: only http/https possible!\n";
-// 					return EXIT_FAILURE;
-// 				}
+				if (urlView.scheme_id() == url::scheme::http ||
+						urlView.scheme_id() == url::scheme::https)
+				{
+					scheme = urlView.scheme();
+				} else
+				{
+					std::cerr << "Unavailable scheme: only http/https possible!\n";
+					return EXIT_FAILURE;
+				}
 
-// 				origin = scheme + "://" + host;
-
-// 				httplib::Client simpleClient(origin);
-// 				simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
-
-// #if defined CPPHTTPLIB_OPENSSL_SUPPORT
-// 				if (simpleClient.is_ssl())
-// 				{
-// 					if (strCaCertFilepath.empty())
-// 					{
-// 						std::cerr << "Error: Certificate path must be specified!\n";
-// 						return EXIT_FAILURE;
-// 					}
+				origin = scheme + "://" + host; // urlView.encoded_origin()
+				simpleClient = httplib::Client(origin);
+				simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
+#if defined CPPHTTPLIB_OPENSSL_SUPPORT
+				if (simpleClient.is_ssl())
+				{
+					if (strCaCertFilepath.empty())
+					{
+						std::cerr << "Error: Certificate path must be specified!\n";
+						return EXIT_FAILURE;
+					}
 					
-// 					simpleClient.set_ca_cert_path(strCaCertFilepath);
-// 				}
-// #endif // CPPHTTPLIB_OPENSSL_SUPPORT
-// #if defined CPPHTTPLIB_ZLIB_SUPPORT
-// 					simpleClient.set_compress(true);
-// #endif // CPPHTTPLIB_ZLIB_SUPPORT
-// 			} else if (urlView.is_path_absolute()) // absolute url
-// 			{
-// 				path = locationUrl;
-// 				cooker_url_utils_ns::ReplaceUrlResource(url, locationUrl);
-// 			} else // relative path
-// 			{
-// 				path = urlView.path() + locationUrl;
-// 				cooker_url_utils_ns::RemoveQueryAndFrag(url); 
-// 				cooker_url_utils_ns::AppendPath(url, locationUrl);
-// 			}
+					simpleClient.set_ca_cert_path(strCaCertFilepath);
+				}
+#endif // CPPHTTPLIB_OPENSSL_SUPPORT
+#if defined CPPHTTPLIB_ZLIB_SUPPORT
+					simpleClient.set_compress(true);
+#endif // CPPHTTPLIB_ZLIB_SUPPORT
+			} else if (urlView.is_path_absolute()) // absolute url
+			{
+				path = locationUrl;
+				cooker_url_utils_ns::ReplaceUrlResource(requestUrl, locationUrl);
+			} else // relative path
+			{
+				cooker_url_utils_ns::RemoveQueryAndFrag(requestUrl); 
+				cooker_url_utils_ns::AppendPath(requestUrl, locationUrl);
 
-// 			SetCookieHeader(cookiesStorage.get(), urlView.host(), path, 
-// 				urlView.scheme(), defaultRequestHeaders);
+				const std::size_t pathStartPos = requestUrl.find('/');
+				path = requestUrl.substr(pathStartPos, requestUrl.rfind('/') - pathStartPos);
+			}
 
-// 			std::cout << "> Redirecting to " << url << "\n\n";
+			SetCookieHeader(cookiesStorage.get(), host, path,
+				scheme, defaultRequestHeaders);
 
-// 			httpResult = InvokeHTTPMethod(method, simpleClient, path,
-// 				defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
-// 			if (!httpResult)
-// 			{
-// 				std::cerr << "> " << method << " " << url << " failed! " << 
-// 					httplib::to_string(httpResult.error()) << "\n\n";
-// 				return EXIT_FAILURE;
-// 			}
+			std::cout << "> Redirecting to " << requestUrl << "\n\n";
 
+			httpResult = InvokeHTTPMethod(method, simpleClient, path,
+				defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
+			if (!httpResult)
+			{
+				std::cerr << "> " << method << " " << requestUrl << " failed! " << 
+					httplib::to_string(httpResult.error()) << "\n\n";
+				return EXIT_FAILURE;
+			}
 
-// 			ParseSetCookieHeadersAndStore(std::launch::deferred, cookiesStorage.get(), 
-// 				httpResult->headers, urlView);
-// 		}
-// 	}
+			ParseSetCookieHeadersAndStore(std::launch::deferred, cookiesStorage.get(), 
+				httpResult->headers, urlView);
+		}
+	}
 
 	return EXIT_SUCCESS;
 }
