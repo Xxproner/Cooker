@@ -47,14 +47,16 @@ auto to_underlying(Enum e)
 #include "boost/url.hpp"
 #include "boost/url/pct_string_view.hpp"
 namespace url = boost::urls;
+
 #include "boost/utility/string_view.hpp"
 
 #include "boost/tti/has_member_function.hpp"
 #include "boost/system.hpp"
 
+#include <boost/format.hpp>
+using format = boost::format;
+
 #include "lyra.hpp"
-
-
 
 template <typename T>
 using result = boost::system::result<T>;
@@ -64,26 +66,26 @@ namespace cooker_url_utils_ns
 {
     /* site is allowed set the domain or it's subdomains */
     bool
-    IsSubdomain(const std::string& potentialSubdomain, 
+    IsSubdomain(const std::string& likelySubdomain, 
         const std::string& domain)
     {
-        const auto potentialSubdomain_len = potentialSubdomain.length(),
+        const auto likelySubdomain_len = likelySubdomain.length(),
             domain_len = domain.length();
 
-        if (potentialSubdomain_len < domain_len)
+        if (likelySubdomain_len < domain_len)
         {
             return false;
-        } else if (potentialSubdomain_len == domain_len)
+        } else if (likelySubdomain_len == domain_len)
         {
-            return potentialSubdomain == 
+            return likelySubdomain == 
                 domain;
-        } // else ...
+        }
 
-        const auto diff_len = potentialSubdomain.length() - 
+        const auto diff_len = likelySubdomain.length() - 
             domain.length();
-        return potentialSubdomain.compare(
+        return likelySubdomain.compare(
             diff_len, std::string::npos, domain) == 0 && 
-                potentialSubdomain[diff_len - 1] == '.';
+                likelySubdomain[diff_len - 1] == '.';
     };
 
 
@@ -507,7 +509,7 @@ public:
         } else if (cookie.m_domain.empty())
         {
             cookie.m_hostOnly = true;
-            cookie.m_domain = host;
+            cookie.m_domain.assign(host.cbegin(), host.cend());
         } else 
         {
             /* convert the cookie-domain to lower case */
@@ -523,15 +525,13 @@ public:
                     "must be set with `Secure'");
         }
 
-
-        const char* sameSiteC_str = cookie.m_sameSite.c_str();
-        const bool isSameSiteAttrNone = !strcasecmp(sameSiteC_str, "none");
-        if (!isSameSiteAttrNone && strcasecmp(sameSiteC_str, "strict") &&
-                strcasecmp(sameSiteC_str, "lax"))
+        const char* sameSite = cookie.m_sameSite.c_str();
+        const bool isSameSiteAttrNone = !strcasecmp(sameSite, "none");
+        if (!isSameSiteAttrNone && strcasecmp(sameSite, "strict") &&
+                strcasecmp(sameSite, "lax"))
         {
             throw cookie_policy_error("SameSite attribute possible values are: strict, lax, none!");
         }
-
 
         if (isSameSiteAttrNone && !cookie.m_secure)
         {
@@ -890,7 +890,10 @@ public:
             cookie.m_persistent = true;
         }
 
-        cookie.m_sameSite = std::move(sameSite);
+        if (!sameSite.empty())
+        {
+            cookie.m_sameSite = std::move(sameSite);
+        }
 
         /* remove prefix dot from domain cause unnessasary*/
         if (cookie.m_domain.front() == '.') cookie.m_domain.erase(cookie.m_domain.cbegin());
@@ -911,24 +914,24 @@ public:
 
 
     void
-    SetDefaultPath(const std::string& uriPath)
+    SetDefaultPath(const std::string_view cookieLocationPath)
     {
-        if (uriPath.empty() || uriPath[0] != '/')
+        if (cookieLocationPath.empty() || cookieLocationPath[0] != '/')
         {
             m_path.assign("/");
             return ;
         }
 
         const std::size_t rightMostSlashPos =
-            uriPath.find('/');
+            cookieLocationPath.rfind('/');
 
         if (rightMostSlashPos == std::string::npos)
         {
             m_path.assign("/");
             return ;
-        } // else ...
+        }
 
-        m_path.assign(uriPath.substr(0, rightMostSlashPos));
+        m_path.assign(cookieLocationPath.substr(0, rightMostSlashPos));
     };
 };
 
@@ -1195,15 +1198,9 @@ int RemoveObseleteCookies(sqlite3* dbConn, [[maybe_unused]] const std::string& d
 
 
 
-httplib::Headers::iterator SetCookieHeader(sqlite3* dbConn, const std::string& domain,
-    const std::string& path, const std::string& scheme, httplib::Headers& headers)
+std::string GetCookieHeaderValue(sqlite3* dbConn, const std::string& host,
+    const std::string& path, bool isHttps)
 [[gnu::nonnull(1)]];
-
-
-
-void ParseSetCookieHeadersAndStore(std::launch lauchPolicy, sqlite3* dbConn,
-    httplib::Headers& headers, const url::url_view& urlView)
-[[gnu::nonnull(2)]];
 
 
 
@@ -1231,9 +1228,8 @@ int main(int argc, char const *argv[])
 
     httplib::Headers defaultRequestHeaders;
 
-    // Remove dependencies, change to getopt()
-    // but I am not sure it is a good idea
     auto cliParser = lyra::cli()
+    // TODO: add output!
         | lyra::help(isShowHelpTip)
             ("Show this tip")
         | lyra::opt(followRedirect)
@@ -1243,7 +1239,7 @@ int main(int argc, char const *argv[])
         | lyra::opt(sqliteDBFilepath, "sqlite3 database")
             ["--database"]
             ("sqlite database file")
-                .required()
+                .optional()
         | lyra::opt(verboseMode)
             ["--verbose"]["-v"]
             ("Verbose mode")
@@ -1263,7 +1259,7 @@ int main(int argc, char const *argv[])
             ("Preload cookies before request")
         | lyra::opt(defaultSameSite, "default `SameSite' value")
             ["--default-samesite"]["-s"]
-            ("Default `SameSize' value of cookie. (developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie#samesitesamesite-value)")
+            ("Default `SameSize' value of cookie")
                 .optional().choices("same", "lax", "none")
         | lyra::opt([&](std::string header) {
                 const std::size_t keyValueDelimPos = header.find(':');
@@ -1300,6 +1296,13 @@ int main(int argc, char const *argv[])
             std::move(defaultSameSite);
     }
 
+    if (sqliteDBFilepath.empty())
+    {
+        sqliteDBFilepath = "_cookies.sqlite3.db";
+    }
+
+    std::for_each(method.begin(), method.end(), [](char& ch) { ch = std::toupper(ch); });
+    
     struct DBConnCloser
     {
         void operator()(sqlite3* sqliteConn) const noexcept
@@ -1358,67 +1361,7 @@ int main(int argc, char const *argv[])
             return EXIT_FAILURE;
         }
     }
-
-    boost::system::result<url::url_view> parseUrlResult = url::parse_absolute_uri(requestUrl);
-    if (!parseUrlResult)
-    {
-        std::cerr << "Invalid url!\n";
-        return EXIT_FAILURE;
-    }
-
-    url::url_view urlView = parseUrlResult.value();
-
-    // TODO: what do with ipv4 and ipv6
-    // how storage cookie, what its value domain?
-    if (urlView.host_type() != url::host_type::name)
-    {
-        std::cerr << "Invalid host type: must host_type::name!" 
-            << std::endl;
-        return EXIT_FAILURE;
-    }
-
     
-    std::string path = urlView.path()
-              , host = urlView.host();
-    std::string scheme;
-
-    if (path.empty())
-    {
-        path = "/";
-    }
-
-    if (urlView.scheme_id() == url::scheme::http ||
-            urlView.scheme_id() == url::scheme::https)
-    {
-        scheme = urlView.scheme();
-    } else if (urlView.scheme_id() == url::scheme::unknown)
-    {
-        scheme = "http";
-    } else
-    {
-        std::cerr << "Unavailable scheme: only http/https possible!\n";
-        return EXIT_FAILURE;
-    }
-
-    // origin = scheme://host:port
-    std::string origin = scheme + "://" + host;
-
-    httplib::Client simpleClient(origin, urlView.port_number() ?: 80);
-    simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
-
-#if defined CPPHTTPLIB_OPENSSL_SUPPORT
-    if (simpleClient.is_ssl())
-    {
-        if (strCaCertFilepath.empty())
-        {
-            std::cerr << "Error: Certificate path must be specified!\n";
-            return EXIT_FAILURE;
-        }
-        
-        simpleClient.set_ca_cert_path(strCaCertFilepath);
-    }
-#endif // CPPHTTPLIB_OPENSSL_SUPPORT
-
     auto TryAddHeader = [&defaultRequestHeaders](std::string_view keyView, std::string_view valueView){
         auto key = StringViewToString(keyView);
         if (defaultRequestHeaders.find(key) == defaultRequestHeaders.cend())
@@ -1438,156 +1381,181 @@ int main(int argc, char const *argv[])
 
     auto OverwriteHeader = [&defaultRequestHeaders](std::string_view keyView, std::string_view valueView){
         auto key = StringViewToString(keyView);
-        if (httplib::Headers::const_iterator iter = defaultRequestHeaders.find(key);
-                iter != defaultRequestHeaders.cend())
+        auto value = StringViewToString(valueView);
+        if (httplib::Headers::iterator headerIter = defaultRequestHeaders.find(key);
+                headerIter != defaultRequestHeaders.end())
         {
-            defaultRequestHeaders.erase(iter);
-            defaultRequestHeaders.emplace(std::move(key), StringViewToString(valueView));
+            httplib::Headers::value_type& header = *headerIter;
+            header.second = std::move(value);
+        } else
+        {
+            defaultRequestHeaders.emplace(std::move(key), std::move(value));
         }
     };
 
-#if defined CPPHTTPLIB_ZLIB_SUPPORT
-    simpleClient.set_compress(true);
-    OverwriteHeader("Accept-Encoding", "gzip");
-#endif // CPPHTTPLIB_ZLIB_SUPPORT
-
-    if (preloadCookies)
+    bool isFirstReq = true;
+    
+    httplib::Result httpResult;
+    while (isFirstReq || ((http::MultipleChoices_300 < httpResult->status && httpResult->status < http::MultipleChoices_300 + 99) &&
+        numMaxRedirection-- > 0 && followRedirect))
     {
-        if (RemoveObseleteCookies(cookiesStorage.get(), host) != 0)
+        if (!isFirstReq)
         {
-            std::cerr << "Remove obselete cookies failed: <unknown error>\n";
-            return EXIT_FAILURE;
-        }
-
-        SetCookieHeader(cookiesStorage.get(), host, path, scheme, 
-            defaultRequestHeaders);
-    }
-
-    std::for_each(method.begin(), method.end(), [](char& ch) { ch = std::toupper(ch); });
-
-    auto in_range = [](int number, int lower, int upper){
-        return (unsigned)(number - lower) <= (upper - lower);
-    };
-
-    httplib::Result httpResult = InvokeHTTPMethod(method, simpleClient,
-        path, defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
-
-    if (!httpResult)
-    {
-        std::cerr << "> " << method << " " << requestUrl << " failed! " << 
-            httplib::to_string(httpResult.error()) << "\n\n";
-        return EXIT_FAILURE;
-    }
-
-    ParseSetCookieHeadersAndStore(std::launch::async, cookiesStorage.get(), httpResult->headers,
-        urlView);
-
-    if (followRedirect)
-    {
-        while (in_range(httpResult->status, http::MultipleChoices_300, http:: MultipleChoices_300 + 99) &&
-            numMaxRedirection-- > 0)
-        {
-            TransformRedirectedMethod(method, httpResult->status, defaultRequestHeaders);
-
-            typename httplib::Headers::const_iterator 
-                locationHttpHeader = httpResult->headers.find("Location");
-
-            if (locationHttpHeader == httpResult->headers.cend())
-            {
-                std::cout << "Redirect HTTP status but not any `Location' header in response!\n";
-                break;
-            }
-
-            std::string locationUrl = locationHttpHeader->second;
-
-            /* origin   = scheme://authority */
-            /* resource = /path?query#fragment */
-            /* target   = /path?:query */
-            result<url::url_view> parsedLocationUrlResult = url::parse_uri_reference(locationUrl);
-            if (!parsedLocationUrlResult)
-            {
-                std::cout << "Invalid header `Location' value. It is rarely possible!\n";
-                return EXIT_FAILURE;
-            }
+            httplib::Response& res = *httpResult;
             
-            if (urlView.host_type() != url::host_type::name)
+            std::string locationUrl = res.get_header_value("Location");
+            if (locationUrl.empty())
             {
-                std::cout << "Invalid host type of location url: must host_type::name!" 
-                    << std::endl;
+                std::cerr << "Error: redirection response status code but no location header!\n";
                 return EXIT_FAILURE;
             }
 
-            urlView = parsedLocationUrlResult.value();
+            result<url::url_view> parseLocationUrlViewResult = url::parse_uri_reference(locationUrl);
 
-            if (urlView.has_scheme()) // full url
+            if (!parseLocationUrlViewResult.has_value())
             {
-                path = urlView.path();
-                host = urlView.host();
+                std::cerr << "Warning: location header value is not valid url!\n";
+                return EXIT_FAILURE;
+            }
+
+            url::url_view locationUrlView = parseLocationUrlViewResult.value();
+
+            if (locationUrlView.has_scheme()) // url
+            {
                 requestUrl = locationUrl;
-
-                if (path.empty())
-                {
-                    path = "/";
-                }
-
-                if (urlView.scheme_id() == url::scheme::http ||
-                        urlView.scheme_id() == url::scheme::https)
-                {
-                    scheme = urlView.scheme();
-                } else
-                {
-                    std::cerr << "Unavailable scheme: only http/https possible!\n";
-                    return EXIT_FAILURE;
-                }
-
-                origin = scheme + "://" + host;
-                simpleClient = httplib::Client(origin, urlView.port_number() ?: 80);
-                simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
-#if defined CPPHTTPLIB_OPENSSL_SUPPORT
-                if (simpleClient.is_ssl())
-                {
-                    if (strCaCertFilepath.empty())
-                    {
-                        std::cerr << "Error: Certificate path must be specified!\n";
-                        return EXIT_FAILURE;
-                    }
-                    
-                    simpleClient.set_ca_cert_path(strCaCertFilepath);
-                }
-#endif // CPPHTTPLIB_OPENSSL_SUPPORT
-#if defined CPPHTTPLIB_ZLIB_SUPPORT
-                    simpleClient.set_compress(true);
-#endif // CPPHTTPLIB_ZLIB_SUPPORT
-            } else if (urlView.is_path_absolute()) // absolute url
+            } else if (locationUrlView.is_path_absolute()) // absolute path
             {
-                path = locationUrl;
                 cooker_url_utils_ns::ReplaceUrlResource(requestUrl, locationUrl);
             } else // relative path
             {
                 cooker_url_utils_ns::RemoveQueryAndFrag(requestUrl); 
                 cooker_url_utils_ns::AppendPath(requestUrl, locationUrl);
-
-                const std::size_t pathStartPos = requestUrl.find('/');
-                path = requestUrl.substr(pathStartPos, requestUrl.rfind('/') - pathStartPos);
             }
 
-            SetCookieHeader(cookiesStorage.get(), host, path,
-                scheme, defaultRequestHeaders);
+            TransformRedirectedMethod(method, httpResult->status, defaultRequestHeaders);
+            defaultRequestHeaders.erase("Cookie");
+        }
 
-            std::cout << "> Redirecting to " << requestUrl << "\n\n";
+        /* origin   = scheme://authority */
+        /* resource = /path?query#fragment */
+        /* target   = /path?:query */
+        boost::system::result<url::url_view> parseUrlResult = url::parse_absolute_uri(requestUrl);
+        if (!parseUrlResult.has_value())
+        {
+            std::cerr << "Invalid url!\n";
+            return EXIT_FAILURE;
+        }
 
-            httpResult = InvokeHTTPMethod(method, simpleClient, path,
-                defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
-            if (!httpResult)
+        url::url_view urlView = parseUrlResult.value();
+
+        // TODO: what do with ipv4 and ipv6
+        // how storage cookie, what its value domain?
+        if (urlView.host_type() != url::host_type::name)
+        {
+            std::cerr << "Invalid host type: must host_type::name!" 
+                << std::endl;
+            return EXIT_FAILURE;
+        }
+
+        std::string path = urlView.path()
+                  , host = urlView.host();
+        std::string scheme;
+
+        if (path.empty())
+        {
+            path = "/";
+        }
+
+        if (urlView.scheme_id() == url::scheme::http ||
+                urlView.scheme_id() == url::scheme::https)
+        {
+            scheme = urlView.scheme();
+        } else if (urlView.scheme_id() == url::scheme::unknown)
+        {
+            scheme = "http";
+        } else
+        {
+            std::cerr << "Unavailable scheme: only http/https possible!\n";
+            return EXIT_FAILURE;
+        }
+
+        // origin = <scheme://host:port>
+        url::pct_string_view pctOrigin = urlView.encoded_origin();
+        std::string origin(pctOrigin.cbegin(), pctOrigin.cend());
+        httplib::Client simpleClient(origin);
+        simpleClient.set_logger(std::bind(CookerLogger, std::placeholders::_1, std::placeholders::_2, verboseMode));
+
+#if defined CPPHTTPLIB_OPENSSL_SUPPORT
+        if (simpleClient.is_ssl())
+        {
+            if (strCaCertFilepath.empty())
             {
-                std::cerr << "> " << method << " " << requestUrl << " failed! " << 
-                    httplib::to_string(httpResult.error()) << "\n\n";
+                std::cerr << "Error: Certificate path must be specified!\n";
+                return EXIT_FAILURE;
+            }
+            
+            simpleClient.set_ca_cert_path(strCaCertFilepath);
+        }
+#endif // CPPHTTPLIB_OPENSSL_SUPPORT
+
+#if defined CPPHTTPLIB_ZLIB_SUPPORT
+        simpleClient.set_compress(true);
+#endif // CPPHTTPLIB_ZLIB_SUPPORT
+
+        if (preloadCookies || !isFirstReq)
+        {
+            if (RemoveObseleteCookies(cookiesStorage.get(), host) != 0)
+            {
+                std::cerr << "Remove obselete cookies failed: <unknown error>\n";
                 return EXIT_FAILURE;
             }
 
-            ParseSetCookieHeadersAndStore(std::launch::deferred, cookiesStorage.get(), 
-                httpResult->headers, urlView);
+            std::string cookieHeaderValue = GetCookieHeaderValue(cookiesStorage.get(), host, path,
+                urlView.scheme_id() == url::scheme::https);
+            
+            constexpr const char* cookieHeaderKey = "Cookie";
+            defaultRequestHeaders.emplace(cookieHeaderKey, std::move(cookieHeaderValue));
         }
+
+        std::cout << "> " << method << " " << requestUrl << "...\n\n";
+
+        httpResult = InvokeHTTPMethod(method, simpleClient,
+            path, defaultRequestHeaders, !data.empty() ? data.c_str() : nullptr, data.length());
+
+        if (!httpResult)
+        {
+            std::cerr << "> " << method << " " << requestUrl << " failed! " << 
+                httplib::to_string(httpResult.error()) << "\n\n";
+            return EXIT_FAILURE;
+        }
+
+        // std::vector<std::future<int>> vecFt;
+
+        httplib::Response& res = *httpResult;
+        for (auto&& [setCookieHeaderIter, endRange] = res.headers.equal_range("Set-Cookie"); 
+                setCookieHeaderIter != endRange; ++setCookieHeaderIter)
+        {
+            const httplib::Headers::value_type& setCookieHeader = 
+                *setCookieHeaderIter;
+            try
+            {
+                Cookie cookie = Cookie::ParseSetCookieHeaderValue(setCookieHeader.second);
+
+                Cookie::CheckCookiePolicy(cookie, urlView.path(), urlView.scheme(), urlView.host());
+
+                boost::string_view cookieLocation = urlView.buffer();
+                cookie.m_cookieLocation.assign(cookieLocation.cbegin(), cookieLocation.cend());
+                StorageCookie(cookiesStorage.get(), std::move(cookie));
+                // vecFt.emplace_back(std::async(lauchPolicy, &StorageCookie, dbConn, std::move(cookie)));
+            } catch(const Cookie::cookie_policy_error& cookiePolicyError)
+            {
+                std::cerr << "Warning: Cookie (" << setCookieHeader.second << ") from "  << urlView.buffer() << 
+                    " is REJECTED. Reason: " <<
+                        cookiePolicyError.what() << "\n\n";
+            }
+        }
+
+        isFirstReq = false;
     }
 
     return EXIT_SUCCESS;
@@ -1654,118 +1622,64 @@ int RemoveObseleteCookies(sqlite3* dbConn, [[maybe_unused]] const std::string& d
 
 
 
-httplib::Headers::iterator SetCookieHeader(sqlite3* dbConn, const std::string& reqHost,
-    const std::string& reqPath, const std::string& scheme, httplib::Headers& headers)
+std::string GetCookieHeaderValue(sqlite3* dbConn, const std::string& host,
+    const std::string& path, bool isHttps)
 {   
-    const char* ptrRequestUrlHost       = reqHost.c_str();
-    const char* ptrSecondLevelDomain    = ptrRequestUrlHost +
-        reqHost.rfind('.', reqHost.rfind('.') - 1) + 1;
+    const char* ptrHost              = host.c_str();
+    const char* ptrSecondLevelDomain = ptrHost +
+        host.rfind('.', host.rfind('.') - 1) + 1;
 
-    std::string cookiesNameAndValueByDomainAndPathRq = CreateQuery(
+    // TODO: not select obselete cookies
+    std::string selectCookiesRq = boost::str(format(
+    // std::string selectCookiesRq = CreateQuery(
         "SELECT ROWID, name, value "
         "FROM cookies "
-        "WHERE (domain='%s' AND host=1 OR domain LIKE '%%%s' AND host=0) AND path LIKE '%s%%'",
-        ptrRequestUrlHost, ptrSecondLevelDomain, reqPath.c_str());
-
-    if (scheme == "https")
-    {
-        cookiesNameAndValueByDomainAndPathRq += " AND secure=1";
-    }
-
-
-    cookiesNameAndValueByDomainAndPathRq.push_back(';');
-
-    /* load cookies for domain and path and collect obselete cookies' rowids */
-    httplib::Headers::iterator iterCookieHeader = headers.find("Cookie");
-    if (iterCookieHeader == headers.end())
-    {
-        iterCookieHeader = headers.emplace("Cookie", "");
-    } else
-    {
-        iterCookieHeader->second.clear(); /* remove old cookies if exists */
-    }
+        "WHERE (domain='%1%' AND host=1 OR domain LIKE '%%%2%' AND host=0) AND path LIKE '%3%%%'") %
+            host % ptrSecondLevelDomain % path);
     
+    if (isHttps)
+    {
+        selectCookiesRq += " AND secure=1";
+    }
+
+    selectCookiesRq.push_back(';');
+    
+    std::string cookieHeaderValue;
     std::string condRowidIN = " WHERE ROWID IN (";
     
-    auto callbackLambda = [&iterCookieHeader, &condRowidIN](int, char** values, char** columnsNames) -> int {
-        iterCookieHeader->second.append(values[1]).append("=").append(values[2]).push_back(';');
+    auto AppendCookieCallback = [&cookieHeaderValue, &condRowidIN](int, char** values, char** columnsNames) -> int {
+        cookieHeaderValue.append(values[1]).append("=").append(values[2]).push_back(';');
         condRowidIN.append(values[0]);
         condRowidIN.push_back(',');
         return 0;
     };
 
-    if (sqlite3_exec(dbConn, cookiesNameAndValueByDomainAndPathRq.c_str(), 
-            +[](void* callback, int columnsNum, char** values, char** columnsNames){
-                return reinterpret_cast<decltype(callbackLambda)*>(callback)->operator()(columnsNum, values, columnsNames);
-            }, reinterpret_cast<void*>(&callbackLambda), nullptr) != SQLITE_OK)
+    typedef decltype(AppendCookieCallback) Callback_t;
+
+    if (sqlite3_exec(dbConn, selectCookiesRq.c_str(), 
+            +[](void* appendCookieCallback, int columnsNum, char** values, char** columnsNames){
+                return reinterpret_cast<Callback_t*>(appendCookieCallback)->operator()(columnsNum, values, columnsNames);
+            }, reinterpret_cast<void*>(&AppendCookieCallback), nullptr) != SQLITE_OK)
     {
-        // fprintf(stderr, "Request (%s: %s) failed:  %s", __FILENAME__, __LINE__, sqlite3_errmsg(cookiesStorage.get()));
         throw std::runtime_error("SQL request failed!");
     }
 
-    if (!iterCookieHeader->second.empty()) /* cookie has been added */
+    if (!cookieHeaderValue.empty()) /* cookie has been added */
     {
-        iterCookieHeader->second.pop_back();
-        /* remove symbol `,' */
+        cookieHeaderValue.pop_back();
+        // remove symbol `,'
         condRowidIN.pop_back(); condRowidIN.append(");");
 
-        std::string updateCookiesLastAccessDateRq = CreateQuery("UPDATE cookies SET last_access_time='%s' %s",
-            Cookie::format(std::chrono::system_clock::now()).c_str(), condRowidIN.c_str());
+        std::string updateCookiesLastAccessDateRq = boost::str(format("UPDATE cookies SET last_access_time='%1%' %2%") %
+            Cookie::format(std::chrono::system_clock::now()) % condRowidIN);
 
         if (sqlite3_exec(dbConn, updateCookiesLastAccessDateRq.c_str(), nullptr, nullptr, nullptr) != SQLITE_OK)
         {
-            // fprintf(stderr, "Request (%s: %d) failed:  %s\n", __FILENAME__, __LINE__, sqlite3_errmsg(cookiesStorage.get()));
             throw std::runtime_error("SQL request failed!");
         }
-    } else
-    {
-        headers.erase(iterCookieHeader);
-        iterCookieHeader = headers.end();
     }
 
-    return iterCookieHeader;
-}
-
-
-
-/* TODO: change url::url_view to std::string */
-void ParseSetCookieHeadersAndStore(std::launch lauchPolicy, sqlite3* dbConn,
-    httplib::Headers& headers, const url::url_view& urlView)
-{
-    std::vector<std::future<int>> vecFt;
-
-    for (auto [iterSetCookieHeader, endRange] = headers.equal_range("Set-Cookie"); 
-            iterSetCookieHeader != endRange; ++iterSetCookieHeader)
-    {
-        const httplib::Headers::value_type& setCookieHeader = 
-            *iterSetCookieHeader;
-        try
-        {
-            Cookie cookie = Cookie::ParseSetCookieHeaderValue(setCookieHeader.second);
-
-            // check process path
-            Cookie::CheckCookiePolicy(cookie, urlView.path(), urlView.scheme(), urlView.host());
-
-            boost::string_view cookieLocation = urlView.buffer();
-            cookie.m_cookieLocation.assign(cookieLocation.cbegin(), cookieLocation.cend());
-            vecFt.emplace_back(std::async(lauchPolicy, &StorageCookie, dbConn, std::move(cookie)));
-        } catch(const Cookie::cookie_policy_error& cookiePolicyError)
-        {
-            std::cerr << "Warning: Cookie (" << setCookieHeader.second << ") from "  << urlView.buffer() << 
-                " is REJECTED. Reason: " <<
-                    cookiePolicyError.what() << "\n\n";
-        }
-    }
-
-    std::for_each(vecFt.begin(), vecFt.end(), [](std::future<int>& futureObj){
-        futureObj.wait();
-        int storageCookieExecCode = futureObj.get();
-        if (storageCookieExecCode != SQLITE_OK)
-        {
-            std::cerr << "Storage cookie failed: " << 
-                sqlite3_errstr(storageCookieExecCode) << std::endl;
-        }
-    });
+    return cookieHeaderValue;
 }
 
 
