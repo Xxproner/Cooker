@@ -142,6 +142,7 @@ namespace cooker_url_utils_ns
             if (removingPos == npos)
             {
                 removingPos = savedRemovingPos;
+                
             }
 
             url.erase(removingPos);
