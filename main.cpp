@@ -120,13 +120,14 @@ namespace cooker_url_utils_ns
     void ReplaceUrlResource(std::string& url, const std::string& replacingResource)
     {
         constexpr const auto npos = std::string::npos;
-        std::size_t replacingPos = url.find('/');
+        std::size_t replacingPos = url.find(url.find('/') + 1, '/');
         if (replacingPos == npos)
         {
-            replacingPos = url.length();
+            url.append(replacingResource);
+            return ;
         }
 
-        url.replace(replacingPos, npos, replacingResource);
+        url.replace(replacingPos, url.length(), replacingResource);
     };
 
 
@@ -142,7 +143,6 @@ namespace cooker_url_utils_ns
             if (removingPos == npos)
             {
                 removingPos = savedRemovingPos;
-                
             }
 
             url.erase(removingPos);
@@ -489,35 +489,43 @@ public:
             cookie.SetDefaultPath(path);
         }
 
-        if (cookie.m_secure && scheme != "https") 
+        if (scheme != "https") 
         {
-            constexpr const char* SecureAttrFromHTTPError = "Insecure site "
-                     "cannot set cookies with the `Secure' attribute!"; 
-            throw Cookie::cookie_policy_error(SecureAttrFromHTTPError);
+            if (cookie.m_secure)
+            {
+                constexpr const char* SecureAttrFromHTTPError = "Insecure site "
+                         "cannot set cookies with the `Secure' attribute!"; 
+                throw Cookie::cookie_policy_error(SecureAttrFromHTTPError);
+            }
+        } else // scheme == https
+        {
+            // cookies from https auto secure!
+            if (!cookie.m_secure)
+            {
+                cookie.m_secure = true;
+            }
+        }
+
+        if (cookie.m_domain.empty())
+        {
+            cookie.m_hostOnly = true;
+            cookie.m_domain.assign(host.cbegin(), host.cend());
+        } else if (!cookie.m_domain.empty() && 
+                !cooker_url_utils_ns::IsSubdomain(host, cookie.m_domain))
+        {
+            throw Cookie::cookie_policy_error("Only the current domain can be set as the value,"
+                " or a domain of a higher order");
+        }
+
+        for (auto& ch : cookie.m_domain)
+        {
+            ch = std::tolower(ch);
         }
 
         // public prefix must be rejected!
         if (cookie.m_domain.find('.') == std::string::npos)
         {
             throw Cookie::cookie_policy_error("Public prefix cannot be domain-attribute value!");
-        }
-
-        if (!cookie.m_domain.empty() && 
-                !cooker_url_utils_ns::IsSubdomain(host, cookie.m_domain))
-        {
-            throw Cookie::cookie_policy_error("Only the current domain can be set as the value,"
-                " or a domain of a higher order");
-        } else if (cookie.m_domain.empty())
-        {
-            cookie.m_hostOnly = true;
-            cookie.m_domain.assign(host.cbegin(), host.cend());
-        } else 
-        {
-            /* convert the cookie-domain to lower case */
-            for (auto& ch : cookie.m_domain)
-            {
-                ch = std::tolower(ch);
-            }
         }
 
         if (cookie.m_partitioned && !cookie.m_secure)
@@ -700,11 +708,14 @@ public:
     static
     std::string format(std::chrono::time_point<std::chrono::system_clock> tp)
     {
-        std::string timeString; timeString.resize(48);
+        constexpr std::size_t timeStrBufSize = 128;
+        char timeStrBuf[timeStrBufSize]; // quite enough
         time_t time_tCookieCreated = std::chrono::system_clock::to_time_t(tp);
-        strftime(timeString.data(), timeString.size(), Cookie::timeFormat, 
+        // strftime may returns 0 in case not enough buf len
+        [[maybe_unused]] std::size_t timeStrLen = strftime(timeStrBuf, timeStrBufSize, Cookie::timeFormat, 
             std::localtime(&time_tCookieCreated));
-        return timeString;
+
+        return std::string(timeStrBuf);
     }
 
 
@@ -940,17 +951,11 @@ std::string Cookie::defaultSameSiteValue = "None";
 
 
 
+template <typename... Args>
 std::string
-CreateQuery(const char* format, ...)
+CreateQuery(const char* queryFormat, Args&&... args)
 {
-    std::string rq;
-    va_list args, args2;
-    va_start(args, format);
-    va_copy(args2, args);
-    const std::size_t rqLen = vsnprintf(nullptr, 0, format, args2);
-    rq.resize(rqLen + 1);
-    vsnprintf(rq.data(), rqLen + 1, format, args);
-    return rq;
+    return boost::str((format(queryFormat) % ... % args));
 };
 
 
@@ -1632,11 +1637,10 @@ std::string GetCookieHeaderValue(sqlite3* dbConn, const std::string& host,
 
     // TODO: not select obselete cookies
     std::string selectCookiesRq = boost::str(format(
-    // std::string selectCookiesRq = CreateQuery(
-        "SELECT ROWID, name, value "
+        "SELECT ROWID, name, value, path "
         "FROM cookies "
-        "WHERE (domain='%1%' AND host=1 OR domain LIKE '%%%2%' AND host=0) AND path LIKE '%3%%%'") %
-            host % ptrSecondLevelDomain % path);
+        "WHERE domain='%1%' AND host=1 OR domain LIKE '%%%2%' AND host=0") %
+            host % ptrSecondLevelDomain);
     
     if (isHttps)
     {
@@ -1648,10 +1652,17 @@ std::string GetCookieHeaderValue(sqlite3* dbConn, const std::string& host,
     std::string cookieHeaderValue;
     std::string condRowidIN = " WHERE ROWID IN (";
     
-    auto AppendCookieCallback = [&cookieHeaderValue, &condRowidIN](int, char** values, char** columnsNames) -> int {
-        cookieHeaderValue.append(values[1]).append("=").append(values[2]).push_back(';');
-        condRowidIN.append(values[0]);
-        condRowidIN.push_back(',');
+    auto AppendCookieCallback = [&cookieHeaderValue, &condRowidIN, &path](int, char** values, char** columnsNames) -> int {
+        std::string_view cookiePath(values[3]);
+        const std::size_t cookiePathLen = cookiePath.length();
+        // c++20 starts_with implementation
+        if (cookiePathLen <= path.length() && 
+                (path.compare(0, cookiePathLen, cookiePath) == 0))
+        {
+            cookieHeaderValue.append(values[1]).append("=").append(values[2]).push_back(';');
+            condRowidIN.append(values[0]);
+            condRowidIN.push_back(',');
+        }
         return 0;
     };
 
@@ -1667,9 +1678,9 @@ std::string GetCookieHeaderValue(sqlite3* dbConn, const std::string& host,
 
     if (!cookieHeaderValue.empty()) /* cookie has been added */
     {
-        cookieHeaderValue.pop_back();
-        // remove symbol `,'
-        condRowidIN.pop_back(); condRowidIN.append(");");
+        cookieHeaderValue.pop_back(); // remove symbol `;'
+        condRowidIN.pop_back(); /* remove symbol `,' */
+        condRowidIN.append(");");
 
         std::string updateCookiesLastAccessDateRq = boost::str(format("UPDATE cookies SET last_access_time='%1%' %2%") %
             Cookie::format(std::chrono::system_clock::now()) % condRowidIN);
