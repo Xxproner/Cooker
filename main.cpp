@@ -216,6 +216,14 @@ namespace cooker_HTTP_ns
 
 namespace cooker_details
 {
+    bool ichar_equals(char a, char b)
+    {
+        return std::tolower(static_cast<unsigned char>(a)) ==
+               std::tolower(static_cast<unsigned char>(b));
+    }
+
+
+
     int safe_strncasecmp(const char* lhs, std::size_t lhs_len, 
         const char* rhs, std::size_t rhs_len)
     {
@@ -235,31 +243,69 @@ namespace cooker_details
 
 
 
+    [[deprecated]]
     bool starts_with_case(const char* lhs, std::size_t lhs_len, 
         const char* rhs, std::size_t rhs_len)
     {
-        // basic_string_view(data(), std::min(size(), sv.size())) == sv
         if (lhs_len < rhs_len)
         {
             return false;
         }
 
-        return strncasecmp(lhs, rhs, rhs_len) == 0;
+        return std::equal(rhs, rhs + rhs_len, lhs, ichar_equals);
     };
 
 
 
+    bool starts_with_case(std::string_view lhs, std::string_view rhs)
+    {
+        if (lhs.length() < rhs.length())
+        {
+            return false;
+        }
+
+        return std::equal(rhs.begin(), rhs.end(), lhs.begin(), ichar_equals);
+    };
+
+
+
+    [[deprecated]]
     bool starts_with(const char* lhs, std::size_t lhs_len, 
         const char* rhs, std::size_t rhs_len)
     {
-        // basic_string_view(data(), std::min(size(), sv.size())) == sv
         if (lhs_len < rhs_len)
         {
             return false;
         }
 
-        return std::strncmp(lhs, rhs, rhs_len) == 0;
+        return std::equal(rhs, rhs + rhs_len, lhs);
     };
+
+
+
+    bool starts_with(std::string_view lhs, std::string_view rhs)
+    {
+        if (lhs.length() < rhs.length())
+        {
+            return false;
+        }
+
+        return std::equal(rhs.begin(), rhs.end(), lhs.begin());
+    };
+
+
+
+    bool ends_with(std::string_view lhs, std::string_view rhs)
+    {
+        if (lhs.length() < rhs.length())
+        {
+            return false;
+        }
+
+        return std::equal(rhs.rbegin(), rhs.rend(), 
+            lhs.rbegin());
+    };
+
 
 
 
@@ -417,11 +463,31 @@ public:
 
 
 
-    class cookie_policy_error : public std::runtime_error
+    class cookie_error : public std::runtime_error
     {
     public:
-        cookie_policy_error(const char* err_msg)
-            : runtime_error(err_msg)
+        using std::runtime_error::runtime_error;
+    };
+
+
+
+    class cookie_policy_error : public cookie_error
+    {
+    public:
+        cookie_policy_error(std::string err_msg)
+            : cookie_error(std::move(err_msg))
+        {
+            /* nothing */
+        };
+    };
+
+
+
+    class cookie_parse_error : public cookie_error
+    {
+    public:
+        cookie_parse_error(std::string err_msg)
+            : cookie_error(std::move(err_msg))
         {
             /* nothing */
         };
@@ -449,34 +515,10 @@ public:
         cookie.m_hostOnly               = false;
         cookie.m_creationTime           = std::chrono::system_clock::now();
         cookie.m_sameSite               = GetDefaultSameSiteValue();
+        cookie.m_expires                = std::chrono::system_clock::from_time_t(time_t{0});
 
         return cookie;
     }
-
-
-
-    static bool
-    PolicyCookiePath(const std::string& cookiePath, 
-        const std::string& path)
-    {
-        // if (cookiePath.empty())
-        // {
-        //  return true;
-        // }
-
-        auto IsLowerLevelPath = [](const std::string& potentialLowerLevelPath, 
-            const std::string& path){
-            return cooker_details::starts_with(potentialLowerLevelPath.c_str(), potentialLowerLevelPath.length(),
-                path.c_str(), path.length());
-        };
-
-        if (!IsLowerLevelPath(path, cookiePath))
-        {
-            return false;
-        }
-
-        return true;
-    };
 
 
 
@@ -484,42 +526,39 @@ public:
     void CheckCookiePolicy(Cookie& cookie, const std::string& path,
         const std::string& scheme, const std::string& host)
     {
-        if (cookie.m_path.empty() || (cookie.m_path[0] != '/'))
+        if (cookie.m_expires > std::chrono::system_clock::now())
         {
-            cookie.SetDefaultPath(path);
+            cookie.m_persistent = true;
         }
 
-        if (scheme != "https") 
+        if (cookie.m_path.empty() || cookie.m_path.front() != '/')
         {
-            if (cookie.m_secure)
-            {
-                constexpr const char* SecureAttrFromHTTPError = "Insecure site "
-                         "cannot set cookies with the `Secure' attribute!"; 
-                throw Cookie::cookie_policy_error(SecureAttrFromHTTPError);
-            }
-        } else // scheme == https
+            cookie.m_path = ComputeCookieDefaultPath(cookie.m_path);
+        } else 
         {
-            // cookies from https auto secure!
-            if (!cookie.m_secure)
+            if (cookie.m_path != path && 
+                    !(cooker_details::starts_with_case(path, cookie.m_path) && 
+                        (cookie.m_path.back() == '/' || path[cookie.m_path.length()] == '/')))
             {
-                cookie.m_secure = true;
+                throw Cookie::cookie_policy_error("Request path does not match cookie path");
             }
         }
-
-        if (cookie.m_domain.empty())
-        {
-            cookie.m_hostOnly = true;
-            cookie.m_domain.assign(host.cbegin(), host.cend());
-        } else if (!cookie.m_domain.empty() && 
-                !cooker_url_utils_ns::IsSubdomain(host, cookie.m_domain))
-        {
-            throw Cookie::cookie_policy_error("Only the current domain can be set as the value,"
-                " or a domain of a higher order");
-        }
-
+        
+        if (cookie.m_domain.front() == '.') cookie.m_domain.erase(cookie.m_domain.cbegin());
         for (auto& ch : cookie.m_domain)
         {
             ch = std::tolower(ch);
+        }
+
+        if (cookie.m_domain.empty() || cookie.m_domain.back() == '.')
+        {
+            cookie.m_hostOnly = true;
+            cookie.m_domain = host;
+        } else if (not (cooker_details::ends_with(host, cookie.m_domain) && // !cooker_url_utils_ns::IsSubdomain(host, cookie.m_domain)
+                        *std::next(host.rbegin(), cookie.m_domain.length()) == '.'))
+        {
+            throw Cookie::cookie_policy_error("Only the current domain can be set as the value,"
+                " or a domain of a higher order");
         }
 
         // public prefix must be rejected!
@@ -528,9 +567,50 @@ public:
             throw Cookie::cookie_policy_error("Public prefix cannot be domain-attribute value!");
         }
 
+
+        const char* hostPrefix = "__Host-";
+        const char* securePrefix = "__Secure-";
+
+        if (cooker_details::starts_with_case(cookie.m_name, hostPrefix))
+        {
+            if (not (cookie.m_path == "/" && cookie.m_domain.empty() &&
+                    cookie.m_secure))
+            {
+                throw cookie_policy_error("`__Host' prefix policy error!");
+            }
+
+            cookie.m_name.erase(cookie.m_name.cbegin(), cookie.m_name.cbegin() + std::strlen(hostPrefix));
+        } else if (cooker_details::starts_with_case(cookie.m_name.c_str(), cookie.m_name.length(),
+                securePrefix, std::strlen(securePrefix)))
+        {
+            if (!cookie.m_secure)
+            {
+                throw cookie_policy_error("`__Secure' prefix policy error!");
+            }
+
+            cookie.m_name.erase(cookie.m_name.cbegin(), cookie.m_name.cbegin() + std::strlen(securePrefix));
+        }
+ 
+        if (scheme != "https") 
+        {
+            if (cookie.m_secure)
+            {
+                constexpr const char* SecureAttrFromHTTPError = "Insecure site "
+                         "cannot set cookies with the `Secure' attribute!"; 
+                throw cookie_policy_error(SecureAttrFromHTTPError);
+            }
+        } else
+        {
+            // cookies from https auto secure!
+            if (!cookie.m_secure)
+            {
+                cookie.m_secure = true;
+            }
+        }
+
         if (cookie.m_partitioned && !cookie.m_secure)
         {
-            throw Cookie::cookie_policy_error("Partitioned attribute "
+            throw cookie_policy_error("Partitioned attribute "
                     "must be set with `Secure'");
         }
 
@@ -730,18 +810,6 @@ public:
     }
 
 
-
-    struct parsing_error : std::runtime_error
-    {
-        parsing_error(std::string msg)
-            : runtime_error(std::move(msg))
-        {
-            // nothing
-        }
-    };
-
-
-
     /**
      * considered param is a VALID `Set-Cookie' header value! 
      * NO CHECKING SEMANTIC PARSED COOKIE correctness 
@@ -749,175 +817,127 @@ public:
     static Cookie 
     ParseSetCookieHeaderValue(const std::string& setCookieHeaderValue)
     {
+        using namespace std::literals::string_literals;
         // Set-Cookie: <cookie-name>=<cookie-value>; Domain=<domain-value>; Secure; HttpOnly
         // non-terminal symbols : Domain; Secure; HttpOnly, Path, SameSize, 
         // Max-Age, Expires, Partitioned
 
-        /* parsing */
-        /* parse <cookie-name>=<cookie-value> */
-        constexpr char delim    = ';';
-        std::size_t delimPos    = setCookieHeaderValue.find(delim)
-                  , oldDelimPos = setCookieHeaderValue.find_first_not_of(" ");
+        Cookie cookie = CreateDefaultCookie();
 
-        // only <name>=<value>
-        const bool isCommonCookie = delimPos == std::string::npos;
+        // rfc 6265 section 4
+#define cookieTokenValueRegex R"([\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]*)"
+#define cookieValueRegex cookieTokenValueRegex "|\"" cookieTokenValueRegex "\")(?:;( .*))?";
 
-        std::string_view cookieNameAndValue(setCookieHeaderValue.data() + oldDelimPos, 
-            (isCommonCookie ? setCookieHeaderValue.length() : delimPos) - oldDelimPos);
-        std::size_t cookieNameValueDelimPos = cookieNameAndValue.find('=');
-        /* considered it is success */
-        const char* hostPrefix = "__Host-";
-        const char* securePrefix = "__Secure-";
+#define cookieNameRegex R"([\x21-\x27\x2A-\x2E\x30-\x39\x41-\x5A\x5E-\x7A\x7E]+)"
 
-        /* not possible both! */
-        bool    cookieHasSecurePrefix = false,
-                cookieHasHostPrefix = false;
-        std::size_t cookieNamePos = oldDelimPos;
-        if (cooker_details::starts_with_case(cookieNameAndValue.data(), cookieNameAndValue.length(),
-                hostPrefix, std::strlen(hostPrefix)))
-        {
-            cookieHasHostPrefix = true;
-            cookieNamePos += std::strlen(hostPrefix);
-        } else if (cooker_details::starts_with_case(cookieNameAndValue.data(), cookieNameAndValue.length(),
-                securePrefix, std::strlen(securePrefix)))
-        {
-            cookieHasSecurePrefix = true;
-            cookieNamePos += std::strlen(securePrefix);
-        }
+        constexpr const char* setCookieRegexStr = "(" cookieNameRegex ")=(" cookieValueRegex // ")(?:;( .*))?;";
 
-        Cookie cookie = Cookie::CreateDefaultCookie();
-        cookie.m_name = cookieNameAndValue.substr(cookieNamePos, cookieNameValueDelimPos - cookieNamePos);
-        cookie.m_value = cookieNameAndValue.substr(cookieNameValueDelimPos + 1);
-        /* end parsing <cookie-name>=<cookie-value> */
-
-        if (isCommonCookie)
-        {
-            return cookie;
-        }
-
-        std::string maxAge
-            , expires
-            , sameSite;
-
-        /* case insensitive! */
-        using PairValue_T = std::pair<const char*, std::string& >;
-        PairValue_T valuedCookieNonTerminals[5] =
-            { {"Domain"     , cookie.m_domain   }, {"Path"      , cookie.m_path }, 
-              {"SameSite"   , sameSite          }, {"Expires"   , expires       }, 
-              {"Max-Age"    , maxAge            }
-            };
+#undef cookieTokenValueRegex
+#undef cookieValueRegex
+#undef cookieNameRegex
         
-        using PairOption_T = std::pair<const char*, bool&>;
-        PairOption_T optionedCookieNonTerminals[3] =
-            { {"HttpOnly"   , cookie.m_httpOnly     }, {"Secure", cookie.m_secure}, 
-              {"Partitioned", cookie.m_partitioned  }
-            };
+        std::regex setCookieRegex(setCookieRegexStr);
+        std::smatch setCookieMatchRes;
+        if (std::regex_match(setCookieHeaderValue, setCookieMatchRes, setCookieRegex))
+        {
+            cookie.m_name = setCookieMatchRes[1].str();
+            cookie.m_value = setCookieMatchRes[2].str();
+        } else 
+        {
+            throw cookie_parse_error("Invalid set-cookie-string");
+        }
 
-        auto FindInContainer = [](const auto& value, const auto& storage,
-                auto comparer){
-            
-            using storage_T = decltype(storage);
-            using value_T   = decltype(value);
+        std::string::const_iterator cookieAvBegin = setCookieMatchRes[3].first;
+        while (cookieAvBegin != setCookieHeaderValue.cend())
+        {
+            cookieAvBegin++; // skip whitespace between attrs
 
-            if constexpr (has_member_function_find<storage_T, value_T>::value)
-            {
-                return storage.find(value);
+            std::string::const_iterator cookieAttrEnd = cookieAvBegin;
+
+            while (cookieAttrEnd != setCookieHeaderValue.cend() && 
+                *cookieAttrEnd != '=' && *cookieAttrEnd != ';')
+            { 
+                cookieAttrEnd++;
             }
 
-            auto iter = std::cbegin(storage);
-            for ( ; iter != std::cend(storage); ++iter)
+            std::string_view cookieAttrName(&*cookieAvBegin, std::distance(cookieAvBegin, cookieAttrEnd));
+            std::size_t cookieAttrNameLen = cookieAttrName.length();
+
+            if (cookieAttrEnd != setCookieHeaderValue.cend() && *cookieAttrEnd == '=')
             {
-                if (comparer(*iter, value))
+                std::string_view cookieAttrNameLiteral;
+                std::string* cookieAttrValuePtr = nullptr;
+                if (strncasecmp("Domain", cookieAttrName.data(), cookieAttrNameLen))
                 {
-                    break;
+                    cookieAttrNameLiteral = "Domain";
+                    cookieAttrValuePtr = &cookie.m_domain;
+                } else if (strncasecmp("Path", cookieAttrName.data(), cookieAttrNameLen))
+                {
+                    cookieAttrNameLiteral = "Path";
+                    cookieAttrValuePtr = &cookie.m_path;
+                } else if (strncasecmp("SameSite", cookieAttrName.data(), cookieAttrNameLen))
+                {
+                    cookieAttrNameLiteral = "SameSite";
+                    cookieAttrValuePtr = &cookie.m_sameSite;
+                } else if (strncasecmp("Max-Age", cookieAttrName.data(), cookieAttrNameLen))
+                {
+                    cookieAttrNameLiteral = "Max-Age";
+                    unsigned maxAge = 0ul;
+                    std::from_chars_result fromChRes = std::from_chars(cookieAttrName.begin(), cookieAttrName.end(),
+                        maxAge);
+                    if (fromChRes.ec != std::errc{}) { throw cookie_parse_error("Max-Age attribute value too large"); }
+                    cookie.m_expires = std::chrono::system_clock::now() + std::chrono::seconds(maxAge);
+                } else if (strncasecmp("Expires", cookieAttrName.data(), cookieAttrNameLen))
+                {
+                    cookieAttrNameLiteral = "Expires"; 
+                    cookie.m_expires = ParseDateAttribute({cookieAttrName.begin(), cookieAttrName.end()});
+                } else 
+                {
+                    std::cerr << "Warning: skip unknown attribute: " << cookieAttrName;
+                }
+
+                if (cookieAttrValuePtr)
+                {
+                    std::string& cookieAttrValue = *cookieAttrValuePtr;
+                    if (!cookieAttrValue.empty())
+                    {
+                        throw cookie_parse_error("Double "s.append(cookieAttrNameLiteral.begin(), cookieAttrNameLiteral.end()).append(" attr"));
+                    }
+
+                    cookieAvBegin = cookieAttrEnd;
+                    while (cookieAttrEnd != setCookieHeaderValue.cend() && *cookieAttrEnd != ';')
+                    {
+                        cookieAttrEnd++;
+                    }
+
+                    if (cookieAttrEnd == setCookieHeaderValue.cend())
+                    {
+                        throw cookie_parse_error(std::string(cookieAttrNameLiteral).append(" attr expects value"));
+                    }
+
+                    cookieAttrValue.assign(cookieAvBegin + 1, cookieAttrEnd);
+                }
+            } else
+            {
+                if (strncasecmp("Secure", cookieAttrName.data(), cookieAttrNameLen))
+                {
+                    cookie.m_secure = true;
+                } else if (strncasecmp("HttpOnly", cookieAttrName.data(), cookieAttrNameLen))
+                {
+                    cookie.m_httpOnly = true;
+                } else 
+                {
+                    std::cerr << "Warning: skip unknown attribute: " << cookieAttrName;
                 }
             }
 
-            return iter; 
-        };
-
-        constexpr CookieTokenComparer cookieTokenComparer;
-        delimPos = setCookieHeaderValue.find(delim, oldDelimPos = delimPos + 1);
-        while (delimPos != std::string::npos)
-        {
-            std::string_view setCookieHeaderToken = 
-                std::string_view(setCookieHeaderValue.data() + oldDelimPos, delimPos - oldDelimPos);
-            setCookieHeaderToken = cooker_details::TrimPrefixWhitespace(setCookieHeaderToken);
-            if (auto token = FindInContainer(setCookieHeaderToken, valuedCookieNonTerminals, 
-                cookieTokenComparer); token != std::cend(valuedCookieNonTerminals))
+            if (auto setCookieHeaderValueCend = setCookieHeaderValue.cend(); 
+                    cookieAttrEnd != setCookieHeaderValueCend)
             {
-                token->second.assign(setCookieHeaderToken.substr(
-                    std::strlen(token->first) + 1));
-            } else if (auto token = FindInContainer(setCookieHeaderToken, optionedCookieNonTerminals,
-                    cookieTokenComparer); token != std::cend(optionedCookieNonTerminals))
-            {   
-                token->second = true;
-            } else 
-            {
-                // cout is thread-safe but result implementation defined
-                // throw parsing_error("Unknown attribute: " + setCookieHeaderToken);
-            }
-            
-            oldDelimPos = delimPos + 1;
-            delimPos = setCookieHeaderValue.find(delim, oldDelimPos);
-        }
-
-        /* parse last attribute */
-        std::string_view setCookieHeaderToken = 
-            std::string_view(setCookieHeaderValue.data() + oldDelimPos);
-        setCookieHeaderToken = cooker_details::TrimPrefixWhitespace(setCookieHeaderToken);
-        auto token = FindInContainer(setCookieHeaderToken, valuedCookieNonTerminals, 
-            cookieTokenComparer);
-        if (token != std::cend(valuedCookieNonTerminals))
-        {
-            token->second.assign(setCookieHeaderToken.substr(
-                std::strlen(token->first) + 1));
-        } else 
-        {
-            auto token = FindInContainer(setCookieHeaderToken, optionedCookieNonTerminals,
-                cookieTokenComparer);
-            if (token != std::cend(optionedCookieNonTerminals))
-            {
-                token->second = true;
-            }
-        }
-
-        /* parse last attribute */
-        if (!maxAge.empty())
-        {
-            char* lastProcessedPos = nullptr;
-            long maxAge_s = std::strtol(maxAge.c_str(), &lastProcessedPos, 10);
-            if (errno == ERANGE || lastProcessedPos != (maxAge.c_str() + maxAge.length()))
-            {
-                errno = 0;
-                throw parsing_error("Parsing `Max-Age' attribute error!");
+                cookieAttrEnd++; if (cookieAttrEnd == setCookieHeaderValueCend) { throw cookie_parse_error("Bad set-cookie"s); }
             }
 
-            cookie.m_expires = std::chrono::system_clock::now() + 
-                std::chrono::seconds(maxAge_s);
-            cookie.m_persistent = true;
-        } else if (!expires.empty())
-        {
-            cookie.m_expires = ParseDateAttribute(expires);
-            cookie.m_persistent = true;
-        }
-
-        if (!sameSite.empty())
-        {
-            cookie.m_sameSite = std::move(sameSite);
-        }
-
-        /* remove prefix dot from domain cause unnessasary*/
-        if (cookie.m_domain.front() == '.') cookie.m_domain.erase(cookie.m_domain.cbegin());
-
-        // TODO: mv checks to CheckCookiePolicy()
-        if (cookieHasHostPrefix && !(cookie.m_path == "/" && cookie.m_domain.empty() &&
-                cookie.m_secure))
-        {
-            throw cookie_policy_error("`__Host' prefix policy error!");
-        } else if (cookieHasSecurePrefix && !(cookie.m_secure))
-        {
-            throw cookie_policy_error("`__Secure' prefix policy error!");
+            cookieAvBegin = cookieAttrEnd;
         }
 
         return cookie;
@@ -925,25 +945,27 @@ public:
 
 
 
-    void
-    SetDefaultPath(const std::string_view cookieLocationPath)
+    /**
+    *  @brief - https://httpwg.org/specs/rfc6265.html#cookie-path realization
+    */
+    
+    static std::string
+    ComputeCookieDefaultPath(const std::string_view uriPath)
     {
-        if (cookieLocationPath.empty() || cookieLocationPath[0] != '/')
+        if (uriPath.empty() || uriPath.front() != '/')
         {
-            m_path.assign("/");
-            return ;
+            return "/";
         }
 
-        const std::size_t rightMostSlashPos =
-            cookieLocationPath.rfind('/');
+        std::size_t rightMostSlashPos =
+            uriPath.rfind('/');
 
-        if (rightMostSlashPos == std::string::npos)
+        if (rightMostSlashPos == 0ull)
         {
-            m_path.assign("/");
-            return ;
+            return "/";
         }
 
-        m_path.assign(cookieLocationPath.substr(0, rightMostSlashPos));
+        return std::string(uriPath.begin(), uriPath.begin() + rightMostSlashPos);
     };
 };
 
@@ -1410,6 +1432,78 @@ int main(int argc, char const *argv[])
             httplib::Response& res = *httpResult;
             
             std::string locationUrl = res.get_header_value("Location");
+            std::string linkHeaderValue = res.get_header_value("Link"); // not case sensitive
+
+            if (!linkHeaderValue.empty())
+            {
+                // x-default
+                // if link includes rel='alternative'
+                // link: <url>; key1=value1;...keyN=valueN,...
+
+                constexpr auto npos = std::string::npos;
+                constexpr const char* whitespaceDelims = "\t ";
+                std::size_t linkHeaderUrlStartPos = locationUrl.find(',');
+                if (linkHeaderUrlStartPos == npos) { linkHeaderUrlStartPos = locationUrl.length(); }
+                std::string_view linkHeaderUrl(locationUrl.data(), linkHeaderUrlStartPos);
+
+                std::size_t tokenBeginPos = locationUrl.find('<');
+                if (tokenBeginPos == npos)
+                {
+                    std::cerr << "Invalid link http header value\n";    
+                } else 
+                {
+                    std::size_t tokenEndPos = linkHeaderUrl.find('>', tokenBeginPos + 1);
+                    if (tokenEndPos == npos)
+                    {
+                        std::cerr << "Invalid link http header value\n";
+                    }; tokenEndPos++;
+
+                    std::string_view url(linkHeaderUrl.data() + tokenBeginPos, tokenEndPos - tokenBeginPos);
+                    // skip until `;'
+                    
+                    tokenBeginPos = linkHeaderUrl.find_first_not_of(whitespaceDelims, tokenEndPos);
+                    bool linkIsAlternative = false;
+                    while (tokenBeginPos == npos)
+                    {
+                        if (linkHeaderUrl[tokenBeginPos] != ';')
+                        {
+                            std::cerr << "Error parsing link http header value: syntax error\n";
+                            /* finish */
+                        }; tokenBeginPos++;
+
+                        tokenEndPos = linkHeaderUrl.find(';', tokenBeginPos);
+                        if (tokenEndPos == npos) { tokenEndPos == linkHeaderUrl.length(); }
+
+                        std::string_view token = linkHeaderUrl.substr(tokenBeginPos, tokenEndPos - tokenBeginPos);
+                        std::regex keyValuePairRegex("\\s*(\\w+)\\s*=\\s*(['\"])(\\w+)\2\\s*");
+            
+                        std::match_results<std::string_view::iterator> matchRes;
+                        if (std::regex_match(token.begin(), token.end(), matchRes, keyValuePairRegex))
+                        {
+                            std::string_view key(matchRes[1].first, matchRes[1].length())
+                                , value(matchRes[3].first, matchRes[3].length());
+                            if (key == "rel")
+                            {
+                                if (value == "alternative")
+                                {
+                                    if (linkIsAlternative)
+                                    {
+                                        std::cerr << "Double rel param in link http header value\n";
+                                        // TODO: finish
+                                    }
+
+                                    linkIsAlternative = true;
+                                }
+                            }
+                        } else 
+                        {
+                            std::cerr << "Error parsing link http header value: syntax error\n";
+                            break;
+                        }
+                    }
+                }
+            }
+
             if (locationUrl.empty())
             {
                 std::cerr << "Error: redirection response status code but no location header!\n";
@@ -1553,7 +1647,7 @@ int main(int argc, char const *argv[])
                 cookie.m_cookieLocation.assign(cookieLocation.cbegin(), cookieLocation.cend());
                 StorageCookie(cookiesStorage.get(), std::move(cookie));
                 // vecFt.emplace_back(std::async(lauchPolicy, &StorageCookie, dbConn, std::move(cookie)));
-            } catch(const Cookie::cookie_policy_error& cookiePolicyError)
+            } catch(const Cookie::cookie_error& cookiePolicyError)
             {
                 std::cerr << "Warning: Cookie (" << setCookieHeader.second << ") from "  << urlView.buffer() << 
                     " is REJECTED. Reason: " <<
